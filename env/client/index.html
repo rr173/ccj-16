@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多轨字幕校对台</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- 启动页 -->
+  <div id="landing">
+    <h1>多轨时间轴字幕校对台</h1>
+    <p style="color:var(--muted)">统一毫秒基准 · 实时冲突标注 · 边界推挤 · 三向合并 · 版本树与审计</p>
+    <div class="pane-section-title">已有项目</div>
+    <div id="project-list"></div>
+    <div class="new-row">
+      <input id="new-project-name" placeholder="新项目名称" />
+      <button class="primary" id="new-project-btn">新建项目</button>
+    </div>
+    <div class="new-row">
+      <input id="landing-author" placeholder="你的名字（审计署名）" />
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app" style="display:none; height:100%;">
+    <header>
+      <h1 id="proj-title"></h1>
+      <span id="dirty-dot">● 未保存</span>
+      <span id="save-status"></span>
+      <div class="spacer"></div>
+      <label style="color:var(--muted)">署名</label>
+      <input name="author" id="author-input" />
+      <input id="save-message" placeholder="本次修改说明（可选）" style="width:210px" />
+      <button id="back-btn">项目列表</button>
+      <button class="primary" id="save-btn">保存</button>
+    </header>
+
+    <div id="conflict-banner"></div>
+
+    <main>
+      <div class="preview-wrap">
+        <div id="preview">
+          <div id="preview-video"><div class="subtitle-overlay" id="subtitle-overlay"></div></div>
+          <div id="preview-controls">
+            <button id="play-btn" class="small-btn">▶</button>
+            <span class="time" id="time-current">00:00:00,000</span>
+            <input type="range" id="preview-scrub" min="0" max="600000" step="50" value="0" />
+            <span class="time" id="time-total">00:00:00,000</span>
+            <select id="preview-speed">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </div>
+        </div>
+        <div class="track-toggles" id="track-toggles"></div>
+      </div>
+
+      <div class="timeline-wrap" id="timeline-wrap">
+        <div id="timeline">
+          <div id="ruler"></div>
+          <div id="lanes"></div>
+          <div id="playhead"></div>
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="tabs">
+          <button data-tab="cues" class="active">句子</button>
+          <button data-tab="tracks">轨道</button>
+          <button data-tab="history">版本</button>
+          <button data-tab="audit">审计</button>
+        </div>
+        <div class="tab-pane active" data-pane="cues">
+          <div style="display:flex; gap:8px; margin-bottom:10px;">
+            <button id="add-cue-btn" class="small-btn">+ 新句子</button>
+          </div>
+          <div class="cue-list" id="cue-list"></div>
+        </div>
+        <div class="tab-pane" data-pane="tracks">
+          <button id="add-track-btn" class="small-btn" style="margin-bottom:10px;">+ 新轨道</button>
+          <div id="track-list"></div>
+          <p style="color:var(--muted);font-size:11px;">同一互斥组中的轨道，任何时刻最多只允许一条字幕同时出现。</p>
+        </div>
+        <div class="tab-pane" data-pane="history">
+          <div id="viewing-banner" style="display:none; margin-bottom:10px; padding:8px; border:1px solid var(--warn); border-radius:6px; color:var(--warn);">
+            正在浏览历史版本（只读）。<br/>
+            <button id="branch-edit-btn" class="small-btn" style="margin-top:6px;">基于此版本继续编辑（保留合并关系）</button>
+            <button id="back-head-btn" class="small-btn" style="margin-top:6px;">返回最新版本</button>
+          </div>
+          <div id="rev-list"></div>
+        </div>
+        <div class="tab-pane" data-pane="audit">
+          <div id="audit-list"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 冲突解决弹窗 -->
+  <div class="modal-mask" id="conflict-modal">
+    <div class="modal">
+      <h2>检测到并发修改</h2>
+      <div class="hint">
+        服务器已有他人保存的新版本。没有冲突的句子已自动合并；以下位置双方都做了修改，请逐处选择保留哪一边，
+        <b>不会用任一方整体覆盖</b>。
+      </div>
+      <div id="conflict-list"></div>
+      <div class="modal-footer">
+        <button id="conflict-cancel">取消</button>
+        <button class="primary" id="conflict-confirm">应用选择并保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

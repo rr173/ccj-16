@@ -1,0 +1,16 @@
+{
+  "name": "subtitle-proofreader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "多轨时间轴字幕协同校对工具（三向合并 / 版本树 / 审计）",
+  "main": "server/src/index.js",
+  "scripts": {
+    "start": "node server/src/index.js",
+    "test": "node test/merge.test.js && node test/drag.test.mjs",
+    "test:e2e": "node server/src/index.js & SRV=$!; sleep 1; node test/e2e.test.js; RC=$?; kill $SRV; exit $RC"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2"
+  }
+}

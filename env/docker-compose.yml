@@ -1,0 +1,16 @@
+services:
+  subtitle-proofreader:
+    build: .
+    image: subtitle-proofreader:latest
+    container_name: subtitle-proofreader
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      DATA_DIR: "/data"
+    volumes:
+      - subtitle-data:/data
+    restart: unless-stopped
+
+volumes:
+  subtitle-data:
