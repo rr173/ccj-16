@@ -4,6 +4,7 @@ import { initTimeline, renderTimeline, scrollToCue } from './timeline.js';
 import { initPlayer, seek, pause } from './player.js';
 import { initSidebar, renderCueList, renderTrackList, renderTrackToggles, renderHistory, renderAudit } from './sidebar.js';
 import { openConflictModal } from './conflict.js';
+import { initImportModal } from './importer.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -82,6 +83,8 @@ function updateDirtyUI() {
   $('#save-status').textContent = parts.length ? '⚠ ' + parts.join('，') : '规则检查通过';
   $('#save-status').style.color = parts.length ? 'var(--warn)' : 'var(--ok)';
   $('#save-btn').disabled = state.readOnly;
+  $('#import-btn').disabled = state.readOnly;
+  $('#undo-import-btn').disabled = state.readOnly;
 }
 
 async function doSave() {
@@ -217,6 +220,7 @@ function bind() {
   initTimeline();
   initPlayer();
   initSidebar(handlers);
+  initImportModal({ onCommitted: afterCommit, getAuthor, toast });
 
   subscribe((reason) => {
     if (['drag', 'cue-edit', 'tracks', 'select', 'load'].includes(reason)) {

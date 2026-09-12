@@ -14,7 +14,10 @@
 | 冲突必须人工选择 | 弹窗逐张卡片列出冲突句/字段，"保留我的 / 采用对方"二选一；非冲突句已自动合并，**不存在后保存整版覆盖** |
 | 预览精确同步 | 预览时钟用 `performance.now()` 挂钟锚点 + rAF 驱动（`held + (wallNow-anchor)*speed`），字幕严格在 `[start, end)` 区间显示；暂停/拖进度条/变速都重新锚定，不漂移；切换轨道显隐只过滤显示，播放时刻不变 |
 | 历史版本 | 每次保存生成版本（含双父节点的 merge 提交）。版本面板可只读回看任意版本；"基于此版本继续编辑"后保存会生成指向该历史版本的合并提交，版本关系不丢 |
-| 审计 | 每次提交逐字段记录 add/edit/delete（旧值→新值）、作者、时间、所属版本；冲突人工裁决也单独留痕 |
+| 批量导入 | 句子页「⇪ 批量导入」上传/粘贴 SRT/VTT、CSV/TSV（自动识别 开始/结束/文本/轨道 列，列可改映射）或 JSON 数组；预览逐项标出非法时间、反向区间、空文本、未知轨道、文件内/项目内重复、同槽锁定句；可只勾选合法条目后导入，或取消整个导入（不产生任何写入） |
+| 导入并发安全 | 预览与提交都携带用户当前看到的 `baseRevId`；提交时若项目已有新版本，按句子逐条三向合并，无冲突差异自动并入，冲突逐处人工选择，绝不整体覆盖他人修改 |
+| 可回滚导入 | 导入生成 `import` 版本（历史中可回看，审计逐条记录新增/修改/跳过及原因）。「↶ 撤销上次导入」生成 `rollback` 新版本：只回滚导入后未再被改动的句子，已被他人修改/删除或导入新轨已被引用的逐条跳过并写明原因；不允许重复撤销 |
+| 审计 | 每次提交逐字段记录 add/edit/delete（旧值→新值）、作者、时间、所属版本；冲突人工裁决（`resolve`）、导入跳过原因（`skip`）与回滚（`rollback`）也单独留痕 |
 | Docker | `docker compose up -d`，SQLite 数据在命名卷 `/data` |
 
 ## 快速开始
@@ -34,8 +37,8 @@ docker compose up -d --build
 ## 测试
 
 ```bash
-npm test                  # 三向合并 + 拖动推挤规则单测
-npm run test:e2e          # 端到端：两人并发保存 -> 409 -> 逐处裁决 -> merge 提交 -> 审计
+npm test                  # 三向合并 + 批量导入/回滚 + 拖动推挤规则单测
+npm run test:e2e          # 端到端：并发保存裁决 / 批量导入 -> 冲突裁决 -> 撤销 -> 审计
 ```
 
 ## 使用要点
@@ -45,8 +48,10 @@ npm run test:e2e          # 端到端：两人并发保存 -> 409 -> 逐处裁�
 3. 时间轴：拖块中部整体平移；拖左右两个 7px 手柄改边界（带动相邻句）；句子列表可直接输入时间或 `HH:MM:SS,mmm`。
 4. 🔒 锁定后句子不参与任何修改和推挤。
 5. 保存时若他人已提交，无冲突改动自动合并，冲突逐处选择后再提交。
-6. 预览：空格播放/暂停，进度条拖动定位，0.5×–2× 变速，轨道胶囊切换显隐。
-7. 「版本」页点任意版本只读回看；可基于历史版本分叉再编辑。「审计」页查看逐字段变更。
+6. 「⇪ 批量导入」先选文件/粘贴内容并预览：确认字段与轨道映射、逐行提示无误后再点「应用勾选项」；只有零问题的合法条目可导入，服务端会再次强制校验。若期间他人已提交，同样走逐句冲突裁决。
+7. 「↶ 撤销上次导入」只撤回最近一次导入；导入后已被他人改过的句子不会被覆盖，会在审计中逐条注明保留原因。
+8. 预览：空格播放/暂停，进度条拖动定位，0.5×–2× 变速，轨道胶囊切换显隐。
+9. 「版本」页点任意版本只读回看；可基于历史版本分叉再编辑。「审计」页查看逐字段变更。
 
 ## 合并语义（server/src/merge.js）
 
@@ -59,18 +64,24 @@ npm run test:e2e          # 端到端：两人并发保存 -> 409 -> 逐处裁�
 ## 版本树
 
 ```
-revisions(id, parent1_id 主父, parent2_id 合并的第二父, kind=create|edit|merge, snapshot, author, message)
-audit(revision_id, field, action, old_value, new_value, author)
+revisions(id, parent1_id 主父, parent2_id 合并的第二父,
+          kind=create|edit|merge|import|rollback, snapshot, author, message, meta)
+audit(revision_id, field, action=add|edit|delete|resolve|skip|rollback, old_value, new_value, author)
+import_jobs(id, project_id, base_rev_id 用户看到的版本, head_rev_id 冲突时HEAD, content, options, meta, skips)
 ```
 
-普通提交父链为线性；三向合并提交 `parent1 = 当时HEAD`、`parent2 = 提交者的分叉基点`，因此从任意历史版本分叉再保存都会保留完整的分支/合并关系。
+普通提交父链为线性；三向合并/导入冲突裁决提交 `parent1 = 当时HEAD`、`parent2 = 提交者的分叉基点`，因此从任意历史版本分叉再保存都会保留完整的分支/合并关系。
+
+- `import` 版本的 `meta.imported` 记录每条新增（含完整值）、修改（旧值/新值）、新建轨道，`meta.skips` 记录逐行跳过原因（非法时间/重复/锁定/人工排除），是回滚的依据。
+- `rollback` 版本的 `meta.undoneRevisionId` 指向被撤销的导入；回滚目标取导入**主父**中的值（对方并发修改在冲突裁决中被导入值覆盖时，撤销会恢复对方版本）。
 
 ## 目录
 
 ```
-server/src/   db.js · merge.js（三向合并）· validation.js（规范化/校验/审计diff）· store.js · index.js
-client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/app）
-test/         merge.test.js · drag.test.mjs · e2e.test.js
+server/src/   db.js · merge.js（三向合并）· importer.js（解析/映射/校验/应用/回滚计划）
+              · validation.js（规范化/校验/审计diff）· store.js · index.js
+client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/importer/app）
+test/         merge.test.js · import.test.js · drag.test.mjs · e2e.test.js · import.e2e.test.js
 Dockerfile · docker-compose.yml
 ```
 

@@ -6,8 +6,8 @@
   "main": "server/src/index.js",
   "scripts": {
     "start": "node server/src/index.js",
-    "test": "node test/merge.test.js && node test/drag.test.mjs",
-    "test:e2e": "node server/src/index.js & SRV=$!; sleep 1; node test/e2e.test.js; RC=$?; kill $SRV; exit $RC"
+    "test": "node test/merge.test.js && node test/import.test.js && node test/drag.test.mjs",
+    "test:e2e": "node server/src/index.js & SRV=$!; sleep 1; node test/e2e.test.js; R1=$?; node test/import.e2e.test.js; R2=$?; kill $SRV; exit $((R1 || R2))"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

@@ -24,4 +24,8 @@ export const api = {
   listAudit: (id) => request('GET', `/api/projects/${id}/audit`),
   submit: (id, payload) => request('POST', `/api/projects/${id}/revisions`, payload),
   resolve: (id, payload) => request('POST', `/api/projects/${id}/resolve`, payload),
+  importPreview: (id, payload) => request('POST', `/api/projects/${id}/import/preview`, payload),
+  importCommit: (id, payload) => request('POST', `/api/projects/${id}/import/commit`, payload),
+  importResolve: (id, payload) => request('POST', `/api/projects/${id}/import/resolve`, payload),
+  importUndo: (id, payload) => request('POST', `/api/projects/${id}/import/undo`, payload),
 };

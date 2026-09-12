@@ -74,8 +74,10 @@
           <button data-tab="audit">审计</button>
         </div>
         <div class="tab-pane active" data-pane="cues">
-          <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
             <button id="add-cue-btn" class="small-btn">+ 新句子</button>
+            <button id="import-btn" class="small-btn">⇪ 批量导入</button>
+            <button id="undo-import-btn" class="small-btn" title="撤销最近一次导入（生成新版本）">↶ 撤销上次导入</button>
           </div>
           <div class="cue-list" id="cue-list"></div>
         </div>
@@ -111,6 +113,53 @@
       <div class="modal-footer">
         <button id="conflict-cancel">取消</button>
         <button class="primary" id="conflict-confirm">应用选择并保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量导入弹窗 -->
+  <div class="modal-mask" id="import-modal">
+    <div class="modal wide">
+      <h2>批量导入字幕</h2>
+      <div class="hint">
+        支持 SRT/VTT、CSV/TSV（自动识别 开始/结束/文本/轨道 列）、JSON 数组。导入基于你当前看到的版本校验，
+        先确认解析与逐项提示，再只应用合法条目；取消不会改动项目。
+      </div>
+      <div class="import-step" id="import-step-pick">
+        <div class="new-row">
+          <input type="file" id="import-file" accept=".srt,.vtt,.csv,.tsv,.txt,.json" />
+        </div>
+        <div class="new-row" style="align-items:flex-start;">
+          <textarea id="import-text" rows="6" style="flex:1;font-family:ui-monospace,monospace;font-size:12px;"
+            placeholder="…或直接粘贴字幕内容"></textarea>
+        </div>
+        <div class="new-row">
+          <span style="color:var(--muted)">文件名（帮助判断格式，可选）</span>
+          <input id="import-filename" placeholder="例如 subs.srt / rows.csv" style="flex:1" />
+        </div>
+        <div class="modal-footer">
+          <button id="import-pick-cancel">取消</button>
+          <button class="primary" id="import-parse-btn">解析并预览</button>
+        </div>
+      </div>
+
+      <div class="import-step" id="import-step-preview" style="display:none;">
+        <div id="import-meta" class="import-meta"></div>
+        <div id="import-track-mapping" class="import-mapping"></div>
+        <div id="import-column-mapping" class="import-mapping"></div>
+        <div class="import-bulk">
+          <button class="small-btn" id="import-select-valid">只勾选合法条目</button>
+          <button class="small-btn" id="import-select-none">全部不勾选</button>
+          <span id="import-count" style="color:var(--muted);font-size:12px;align-self:center;"></span>
+        </div>
+        <div class="import-table-wrap">
+          <table class="import-table" id="import-table"></table>
+        </div>
+        <div class="modal-footer">
+          <button id="import-back">返回修改</button>
+          <button id="import-cancel">取消整个导入</button>
+          <button class="primary" id="import-apply-btn">应用勾选项</button>
+        </div>
       </div>
     </div>
   </div>

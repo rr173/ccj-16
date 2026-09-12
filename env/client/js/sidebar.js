@@ -156,14 +156,24 @@ export async function renderHistory() {
     const div = document.createElement('div');
     div.className = 'rev-item';
     if (r.kind === 'merge') div.classList.add('merge');
+    if (r.kind === 'import') div.classList.add('import-rev');
+    if (r.kind === 'rollback') div.classList.add('rollback-rev');
     if (r.id === state.headRevId && !state.viewingRevId) div.classList.add('current');
     if (r.id === state.viewingRevId) div.classList.add('current');
-    const kindLabel = { create: '创建', edit: '编辑', merge: '合并' }[r.kind];
+    const kindLabel = { create: '创建', edit: '编辑', merge: '合并', import: '导入', rollback: '回滚' }[r.kind];
+    let extra = '';
+    if (r.kind === 'import' && r.meta?.kind === 'import') {
+      const m = r.meta.imported;
+      extra = `<br/>新增 ${m.addedCueIds.length} · 修改 ${m.updated.length} · 跳过 ${r.meta.skips?.length || 0}${r.meta.merged ? ' · 含并发合并' : ''}`;
+    }
+    if (r.kind === 'rollback' && r.meta?.kind === 'rollback') {
+      extra = `<br/>回滚 ${r.meta.rolledCueIds.length} 句 · 跳过 ${r.meta.skipped?.length || 0} 句`;
+    }
     div.innerHTML = `
       <div><b>${escapeHtml(r.message || '（无说明）')}</b></div>
       <div class="meta">
         ${kindLabel} · ${escapeHtml(r.author)} · ${new Date(r.created_at).toLocaleString()}<br/>
-        <code>${r.id}</code>${r.parent2_id ? '<br/>↳ 合并自分支 <code>' + r.parent2_id + '</code>' : ''}
+        <code>${r.id}</code>${extra}${r.parent2_id ? '<br/>↳ 合并自分支 <code>' + r.parent2_id + '</code>' : ''}
       </div>
     `;
     div.addEventListener('click', () => window.appHandlers.viewRevision(r.id));
@@ -183,7 +193,7 @@ export async function renderAudit() {
   for (const a of audit) {
     const div = document.createElement('div');
     div.className = 'audit-item';
-    const actionLabel = { add: '新增', edit: '修改', delete: '删除', resolve: '冲突裁决', restore: '恢复' }[a.action];
+    const actionLabel = { add: '新增', edit: '修改', delete: '删除', resolve: '冲突裁决', restore: '恢复', skip: '跳过', rollback: '回滚' }[a.action];
     div.innerHTML = `
       <div><span class="field">${escapeHtml(a.field)}</span> · ${actionLabel}</div>
       ${a.old_value != null ? `<div class="vals"><span class="old">- ${escapeHtml(short(a.old_value))}</span></div>` : ''}
