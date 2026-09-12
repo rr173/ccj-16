@@ -3,6 +3,92 @@
 const MIN_LEN = 100;
 const EPS = 0.5;
 
+/**
+ * 规则校验，与服务端 validation.js 的 validate 保持同一套判定，
+ * 保证保存前的即时标红与保存后的服务端复检结果一致。
+ * 返回 [{ type: 'reverse'|'overlap'|'mutex', cueIds, trackId?|mutexGroup?, message }]
+ * （reverse 对应服务端的 hardErrors，这里并入同一列表，调用方按 type 区分）
+ */
+export function detectViolations(snap) {
+  const violations = [];
+  if (!snap) return violations;
+  const cues = snap.cues || [];
+  const tracks = snap.tracks || [];
+
+  for (const c of cues) {
+    if (c.end <= c.start) {
+      violations.push({
+        type: 'reverse',
+        cueIds: [c.id],
+        message: `句子 ${c.id} 时间反向（结束 ${c.end} ≤ 开始 ${c.start}）`,
+      });
+    }
+  }
+
+  // 同轨重叠：按 start 排序后，每条句与其结束时间之前开始的所有后续句逐一比较，
+  // 长句覆盖多条短句时每一对都要标出（只比相邻对会漏掉被长句完全覆盖的非相邻句）
+  const byTrack = new Map();
+  for (const c of cues) {
+    if (!byTrack.has(c.trackId)) byTrack.set(c.trackId, []);
+    byTrack.get(c.trackId).push(c);
+  }
+  for (const [trackId, list] of byTrack) {
+    list.sort((a, b) => a.start - b.start || a.end - b.end);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length && list[j].start < a.end; j++) {
+        violations.push({
+          type: 'overlap',
+          trackId,
+          cueIds: [a.id, list[j].id],
+          message: `轨道内重叠：${a.id} 与 ${list[j].id}`,
+        });
+      }
+    }
+  }
+
+  // 跨轨互斥：与同轨重叠同理，逐句比较其时间窗内开始的所有后续句
+  const groups = new Map();
+  for (const t of tracks) {
+    if (t.mutexGroup) {
+      if (!groups.has(t.mutexGroup)) groups.set(t.mutexGroup, []);
+      groups.get(t.mutexGroup).push(t.id);
+    }
+  }
+  for (const [group, trackIds] of groups) {
+    const list = cues
+      .filter((c) => trackIds.includes(c.trackId))
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length && list[j].start < a.end; j++) {
+        const b = list[j];
+        if (a.trackId === b.trackId) continue;
+        violations.push({
+          type: 'mutex',
+          mutexGroup: group,
+          cueIds: [a.id, b.id],
+          message: `互斥组「${group}」跨轨冲突：${a.id} 与 ${b.id}`,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
+/** 把检测结果整理成 Map<cueId, Set<type>>，供时间轴与句子列表标红。 */
+export function violatedCueIds(snap) {
+  const map = new Map();
+  for (const v of detectViolations(snap)) {
+    for (const id of v.cueIds) {
+      if (!map.has(id)) map.set(id, new Set());
+      map.get(id).add(v.type);
+    }
+  }
+  return map;
+}
+
 function groupOf(trackId, tracks) {
   return tracks.find((t) => t.id === trackId)?.mutexGroup || null;
 }

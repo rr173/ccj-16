@@ -1,6 +1,9 @@
 // 前端拖动推挤规则的单元测试（在 node 中以 ESM 方式运行）
 import assert from 'node:assert';
-import { dragLeft, dragRight, dragMove } from '../client/js/rules.js';
+import { dragLeft, dragRight, dragMove, detectViolations, violatedCueIds } from '../client/js/rules.js';
+import serverValidation from '../server/src/validation.js';
+
+const { validate: serverValidate, normalizeSnapshot } = serverValidation;
 
 const tracks = [
   { id: 'a', name: 'A', color: '#000', mutexGroup: null },
@@ -106,3 +109,51 @@ const cue = (id, trackId, start, end, locked = false) => ({ id, trackId, start, 
 }
 
 console.log('拖动规则 10 项测试全部通过 ✓');
+
+// 11) 长句覆盖多条短句：客户端即时标红必须标出每一对重叠，而非只有相邻的一对
+{
+  const snap = {
+    tracks: [{ id: 'a', name: 'a', color: '#000', mutexGroup: null }],
+    cues: [
+      cue('long', 'a', 0, 10000),
+      cue('s1', 'a', 1000, 2000),
+      cue('s2', 'a', 3000, 4000),
+    ],
+  };
+  const overlaps = detectViolations(snap).filter((x) => x.type === 'overlap');
+  assert.strictEqual(overlaps.length, 2, '长句与它被覆盖的每句都应各报一处重叠');
+  assert.deepStrictEqual(overlaps.map((x) => x.cueIds.join('~')).sort(), ['long~s1', 'long~s2']);
+
+  const marks = violatedCueIds(snap);
+  for (const id of ['long', 's1', 's2']) {
+    assert.ok(marks.get(id)?.has('overlap'), `${id} 应被标红`);
+  }
+}
+
+// 12) 客户端与服务端校验结果一致（保存前后提示一致）
+{
+  const snap = normalizeSnapshot({
+    tracks: [
+      { id: 'a', name: 'a', color: '#000', mutexGroup: 'g' },
+      { id: 'b', name: 'b', color: '#000', mutexGroup: 'g' },
+      { id: 'c', name: 'c', color: '#000', mutexGroup: null },
+    ],
+    cues: [
+      { id: 'long', trackId: 'a', start: 0, end: 10000, text: '', locked: false },
+      { id: 's1', trackId: 'a', start: 1000, end: 2000, text: '', locked: false },
+      { id: 's2', trackId: 'a', start: 3000, end: 4000, text: '', locked: false },
+      { id: 'm1', trackId: 'b', start: 1500, end: 2500, text: '', locked: false },
+      { id: 'm2', trackId: 'b', start: 5000, end: 6000, text: '', locked: false },
+      { id: 'free', trackId: 'c', start: 100, end: 9900, text: '', locked: false },
+      { id: 'rev', trackId: 'c', start: 20000, end: 19000, text: '', locked: false },
+    ],
+  });
+  const key = (x) => `${x.type}:${x.cueIds.join('~')}`;
+  const clientSide = detectViolations(snap).map(key).sort();
+  const serverSide = [...serverValidate(snap).violations, ...serverValidate(snap).hardErrors]
+    .map((x) => `${x.type}:${(x.cueIds || [x.cueId]).join('~')}`)
+    .sort();
+  assert.deepStrictEqual(clientSide, serverSide, '客户端与服务端检出的违规应完全一致');
+}
+
+console.log('重叠检测与前后端一致性测试全部通过 ✓');

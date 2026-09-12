@@ -77,27 +77,30 @@ function validate(snap) {
     }
   }
 
-  // 同轨重叠
+  // 同轨重叠：按 start 排序后，每条句与其结束时间之前开始的所有后续句逐一比较，
+  // 长句覆盖多条短句时每一对都要标出（只比相邻对会漏掉被长句完全覆盖的非相邻句）
   const byTrack = new Map();
   for (const c of snap.cues) {
     if (!byTrack.has(c.trackId)) byTrack.set(c.trackId, []);
     byTrack.get(c.trackId).push(c);
   }
   for (const [trackId, list] of byTrack) {
-    list.sort((a, b) => a.start - b.start);
-    for (let i = 1; i < list.length; i++) {
-      if (list[i].start < list[i - 1].end && list[i - 1].end > list[i].start) {
+    list.sort((a, b) => a.start - b.start || a.end - b.end);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length && list[j].start < a.end; j++) {
         violations.push({
           type: 'overlap',
           trackId,
-          cueIds: [list[i - 1].id, list[i].id],
-          message: `轨道内重叠：${list[i - 1].id} 与 ${list[i].id}`,
+          cueIds: [a.id, list[j].id],
+          message: `轨道内重叠：${a.id} 与 ${list[j].id}`,
         });
       }
     }
   }
 
-  // 跨轨互斥
+  // 跨轨互斥：与同轨重叠同理，逐句比较其时间窗内开始的所有后续句，
+  // 否则长句覆盖多条短句、或同轨句插在中间时都会漏报
   const groups = new Map();
   for (const t of snap.tracks) {
     if (t.mutexGroup) {
@@ -108,11 +111,12 @@ function validate(snap) {
   for (const [group, trackIds] of groups) {
     const list = snap.cues
       .filter((c) => trackIds.includes(c.trackId))
-      .sort((a, b) => a.start - b.start);
-    for (let i = 1; i < list.length; i++) {
-      const a = list[i - 1];
-      const b = list[i];
-      if (b.start < a.end && a.trackId !== b.trackId) {
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length && list[j].start < a.end; j++) {
+        const b = list[j];
+        if (a.trackId === b.trackId) continue;
         violations.push({
           type: 'mutex',
           mutexGroup: group,

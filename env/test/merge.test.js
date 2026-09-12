@@ -85,4 +85,50 @@ assert.ok(v.violations.some((x) => x.type === 'overlap'), '应检出同轨重叠
 assert.ok(v.violations.some((x) => x.type === 'mutex'), '应检出跨轨互斥冲突');
 assert.ok(v.hardErrors.some((x) => x.type === 'reverse'), '应检出反向区间');
 
+// 长句覆盖多条短句：每一对重叠都要标出，不能只报相邻的一对
+const span = normalizeSnapshot({
+  tracks: [{ id: 'a', name: 'a', color: '#0', mutexGroup: null }],
+  cues: [
+    { id: 'long', trackId: 'a', start: 0, end: 10000, text: '', locked: false },
+    { id: 's1', trackId: 'a', start: 1000, end: 2000, text: '', locked: false },
+    { id: 's2', trackId: 'a', start: 3000, end: 4000, text: '', locked: false },
+  ],
+});
+const spanOverlaps = validate(span).violations.filter((x) => x.type === 'overlap');
+assert.strictEqual(spanOverlaps.length, 2, '长句与它被覆盖的每句都应各报一处重叠');
+assert.deepStrictEqual(
+  spanOverlaps.map((x) => x.cueIds.join('~')).sort(),
+  ['long~s1', 'long~s2'],
+);
+
+// 互斥组同理：一条轨上的长句覆盖另一轨的两条短句，两对都要报；
+// 且同轨句插在中间（a2）不应遮蔽跨轨重叠
+const mutexSpan = normalizeSnapshot({
+  tracks: [
+    { id: 'a', name: 'a', color: '#0', mutexGroup: 'g' },
+    { id: 'b', name: 'b', color: '#0', mutexGroup: 'g' },
+  ],
+  cues: [
+    { id: 'a1', trackId: 'a', start: 0, end: 10000, text: '', locked: false },
+    { id: 'a2', trackId: 'a', start: 10000, end: 11000, text: '', locked: false },
+    { id: 'b1', trackId: 'b', start: 1000, end: 2000, text: '', locked: false },
+    { id: 'b2', trackId: 'b', start: 3000, end: 4000, text: '', locked: false },
+  ],
+});
+const mutexPairs = validate(mutexSpan)
+  .violations.filter((x) => x.type === 'mutex')
+  .map((x) => x.cueIds.join('~'))
+  .sort();
+assert.deepStrictEqual(mutexPairs, ['a1~b1', 'a1~b2'], '互斥长句与每条被覆盖句都应各报一处冲突');
+
+// 首尾相接（end === start）不算重叠
+const touching = normalizeSnapshot({
+  tracks: [{ id: 'a', name: 'a', color: '#0', mutexGroup: null }],
+  cues: [
+    { id: 'p', trackId: 'a', start: 0, end: 1000, text: '', locked: false },
+    { id: 'q', trackId: 'a', start: 1000, end: 2000, text: '', locked: false },
+  ],
+});
+assert.strictEqual(validate(touching).violations.length, 0, '首尾相接不应报重叠');
+
 console.log('全部合并/校验测试通过 ✓');
