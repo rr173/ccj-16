@@ -152,6 +152,37 @@ CREATE TABLE IF NOT EXISTS releases (
   withdrawn_at    INTEGER,
   withdraw_reason TEXT
 );
+-- 发布申请：预检通过后生成，绑定来源版本与当时的预检结果（preflight 快照 + 指纹）；
+-- 审核人可批准/驳回，只有批准且绑定内容仍与当前一致时才能发布。
+-- 状态机：pending（待处理）→ approved（已批准）/ rejected（已驳回）/ invalidated（已失效）；
+--        approved → published（已发布）/ invalidated。
+CREATE TABLE IF NOT EXISTS release_requests (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL,
+  revision_id      TEXT NOT NULL,         -- 绑定的来源版本
+  head_rev_id      TEXT NOT NULL,         -- 申请时项目 HEAD（版本产生新提交即失效）
+  status           TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | invalidated | published
+  preflight        TEXT NOT NULL,         -- 冻结的完整预检结果（绑定）
+  fingerprint      TEXT NOT NULL,         -- 预检结果指纹：阻断处理/警告确认变化即失效
+  confirmations    TEXT NOT NULL DEFAULT '[]', -- 申请时逐项确认的警告 finding id
+  message          TEXT NOT NULL DEFAULT '',
+  applicant        TEXT NOT NULL,         -- 申请人署名
+  reviewer         TEXT,                  -- 审核人署名
+  review_comment   TEXT,                  -- 审核意见（驳回必填）
+  invalid_reason   TEXT,                  -- 失效原因 new-revision | blockers-changed | warnings-changed | hard-error | qc-changed
+  created_at       INTEGER NOT NULL,
+  reviewed_at      INTEGER,
+  invalidated_at   INTEGER,
+  published_at     INTEGER,
+  release_id       TEXT                   -- 发布后关联的快照 id
+);
+CREATE INDEX IF NOT EXISTS idx_relreq_project ON release_requests(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_relreq_rev ON release_requests(project_id, revision_id);
+-- 同一项目同一版本同时只允许一个进行中（待处理/已批准）的申请：
+-- 重复提交命中该索引即返回已有申请（幂等），不产生重复记录
+CREATE UNIQUE INDEX IF NOT EXISTS uq_relreq_active
+  ON release_requests(project_id, revision_id) WHERE status IN ('pending', 'approved');
+
 -- 同一版本只允许存在一个有效发布：重复发布命中该索引时返回已有快照，不产生重复
 CREATE UNIQUE INDEX IF NOT EXISTS uq_release_published
   ON releases(project_id, revision_id) WHERE status = 'published';

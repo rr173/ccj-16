@@ -244,6 +244,9 @@ main {
 .rel-item.ok { border-left: 3px solid var(--ok); }
 .rel-card { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; margin-bottom: 8px; background: var(--panel2); }
 .rel-card.withdrawn { opacity: .65; }
+.rel-card.relreq { border-left: 3px solid var(--warn); }
+.rel-card.relreq.is-approved, .rel-card.relreq.is-published { border-left-color: var(--ok); }
+.rel-card.relreq.is-rejected, .rel-card.relreq.is-invalidated { border-left-color: var(--danger); }
 .rel-card .row { display: flex; gap: 8px; align-items: center; }
 .rel-card .rel-diff { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; }
 .small-btn.link { text-decoration: none; display: inline-block; color: var(--text); }

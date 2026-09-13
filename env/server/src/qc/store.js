@@ -11,6 +11,11 @@
  *   应用后再次检查时间轴硬约束（反向区间）与规则约束（不得引入新的重叠/互斥）。
  * - 发布快照冻结句子/轨道/规则配置/质检摘要与渲染好的 SRT/VTT；
  *   同一版本重复发布命中唯一索引，返回已有快照而不产生重复。
+ * - 发布审批：预检通过后先生成「发布申请」，冻结当时版本与预检结果（含指纹）；
+ *   申请可被审核人批准/驳回（驳回须填意见），只有批准且版本与预检指纹均未变化时
+ *   才能发布快照。重复提交命中进行中申请即幂等返回；版本产生新提交、阻断问题重新
+ *   出现或警告确认项变化时，待处理/已批准申请自动失效（提交钩子 + 读取时复检），
+ *   需重新申请。审核与申请状态流转全部写审计，所有条件更新在事务内完成以保证并发一致。
  */
 const crypto = require('crypto');
 const { db } = require('../db');
@@ -24,6 +29,7 @@ const now = () => Date.now();
 const qid = () => 'q_' + crypto.randomBytes(9).toString('hex');
 const fid = () => 'f_' + crypto.randomBytes(9).toString('hex');
 const relid = () => 'rel_' + crypto.randomBytes(9).toString('hex');
+const rqid = () => 'rq_' + crypto.randomBytes(9).toString('hex');
 const httpError = store.httpError;
 
 /* ================================ 规则配置 ================================ */
@@ -372,6 +378,26 @@ store.onCommit(({ projectId, revision, author }) => {
   store.writeAudit(projectId, revision.id, auditEntries, author);
 });
 
+/* --------- 提交钩子：项目产生新提交后，待处理/已批准的发布申请统一失效 --------- */
+store.onCommit(({ projectId, revision, author }) => {
+  const active = db
+    .prepare(`SELECT id, revision_id, status FROM release_requests WHERE project_id=? AND status IN ('pending','approved')`)
+    .all(projectId);
+  if (!active.length) return;
+  const t = now();
+  const auditEntries = [];
+  for (const rq of active) {
+    db.prepare(
+      `UPDATE release_requests SET status='invalidated', invalid_reason='new-revision', invalidated_at=? WHERE id=? AND status IN ('pending','approved')`,
+    ).run(t, rq.id);
+    auditEntries.push({
+      field: `relreq:${rq.id}`, action: 'relreq-invalidate', oldValue: rq.status,
+      newValue: `invalidated:new-revision（项目 HEAD 推进到 ${revision.id}）`,
+    });
+  }
+  store.writeAudit(projectId, revision.id, auditEntries, author || '系统');
+});
+
 /* ================================ 发布快照 ================================ */
 
 function parseRelease(row) {
@@ -409,7 +435,22 @@ function isHandled(f, headId) {
 /**
  * 发布预检：时间轴硬约束 + 阻断级全部处理 + 待逐项确认的警告清单。
  * 阻断级「已处理」= 已修复，或基于当前 HEAD 标记的忽略（过期忽略不算）。
+ *
+ * fingerprint 摘要绑定预检结果：项目 HEAD、硬约束、质检任务、阻断处理情况、
+ * 待确认警告清单——任一变化（版本产生新提交、阻断问题重新出现、警告确认项变化等）
+ * 都会改变指纹，据此将此前的发布申请自动失效。
  */
+function preflightFingerprint(pre) {
+  return crypto.createHash('sha1').update(JSON.stringify({
+    head: pre.headRevId,
+    hardErrors: pre.hardErrors.map((h) => `${h.type}:${(h.cueIds || []).slice().sort().join(',')}`),
+    jobId: pre.job ? pre.job.id : null,
+    jobFinishedAt: pre.job ? pre.job.finished_at : null,
+    blockers: pre.blockerUnhandled.map((f) => `${f.id}:${f.status}`),
+    warnings: pre.warningsPending.map((f) => f.id).sort(),
+  })).digest('hex').slice(0, 16);
+}
+
 function preflight(projectId, revisionId) {
   const project = store.getProject(projectId);
   if (!project) throw httpError(404, '项目不存在');
@@ -423,7 +464,7 @@ function preflight(projectId, revisionId) {
   const headId = project.head_id;
   const blockerUnhandled = findings.filter((f) => f.severity === 'blocker' && !isHandled(f, headId));
   const warningsPending = findings.filter((f) => f.severity === 'warning' && ['open', 'stale'].includes(f.status));
-  return {
+  const result = {
     revisionId,
     headRevId: headId,
     hardErrors,
@@ -432,17 +473,122 @@ function preflight(projectId, revisionId) {
     warningsPending,
     canPublish: hardErrors.length === 0 && Boolean(jobRow) && blockerUnhandled.length === 0,
   };
+  result.fingerprint = preflightFingerprint(result);
+  return result;
 }
 
-function publish(projectId, { revisionId, author, confirmations = [], message = '' }) {
+/* ================================ 发布申请与审批 ================================ */
+
+const ACTIVE_REQ = `status IN ('pending','approved')`;
+
+function parseRequest(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    preflight: JSON.parse(row.preflight),
+    confirmations: JSON.parse(row.confirmations || '[]'),
+  };
+}
+function getRequest(requestId) {
+  return parseRequest(db.prepare('SELECT * FROM release_requests WHERE id = ?').get(requestId));
+}
+function listRequests(projectId) {
+  revalidateRequests(projectId);
+  return db
+    .prepare('SELECT * FROM release_requests WHERE project_id = ? ORDER BY created_at DESC, id DESC')
+    .all(projectId)
+    .map((r) => {
+      const full = parseRequest(r);
+      // 列表不回传大字段
+      const { preflight, ...rest } = full;
+      return {
+        ...rest,
+        boundHeadRevId: preflight.headRevId,
+        blockerCount: preflight.blockerUnhandled.length,
+        warningCount: preflight.warningsPending.length,
+        hasHardErrors: preflight.hardErrors.length > 0,
+      };
+    });
+}
+
+const INVALID_REASON_TEXT = {
+  'new-revision': '版本产生新提交',
+  'blockers-changed': '阻断问题重新出现或处理情况变化',
+  'warnings-changed': '警告确认项发生变化',
+  'hard-error': '时间轴硬约束不再通过',
+  'qc-changed': '质检结果发生变化',
+};
+
+/**
+ * 读取时复检：把预检指纹与当前不一致的待处理/已批准申请置为失效。
+ * 与提交钩子互补——质检结果/处理决定/警告确认发生变化但未产生新版本时，
+ * 由此路径懒失效，保证页面与审核接口看到的状态始终一致。
+ */
+function revalidateRequests(projectId, revisionId = null) {
+  let rows = db
+    .prepare(`SELECT * FROM release_requests WHERE project_id=? AND ${ACTIVE_REQ}`)
+    .all(projectId);
+  if (revisionId) rows = rows.filter((r) => r.revision_id === revisionId);
+  if (!rows.length) return;
+  const t = now();
+  const auditEntries = [];
+  const invalidate = db.prepare(
+    `UPDATE release_requests SET status='invalidated', invalid_reason=?, invalidated_at=? WHERE id=? AND ${ACTIVE_REQ}`,
+  );
+  const txn = db.transaction(() => {
+    for (const row of rows) {
+      const bound = JSON.parse(row.preflight);
+      let current;
+      try {
+        current = preflight(projectId, row.revision_id);
+      } catch {
+        continue; // 版本/项目异常：交给调用方报错
+      }
+      if (current.fingerprint === row.fingerprint) continue;
+      const reason = current.headRevId !== row.head_rev_id
+        ? 'new-revision'
+        : JSON.stringify(current.blockerUnhandled.map((f) => f.id).sort()) !==
+            JSON.stringify(bound.blockerUnhandled.map((f) => f.id).sort())
+          ? 'blockers-changed'
+          : JSON.stringify(current.warningsPending.map((f) => f.id).sort()) !==
+              JSON.stringify(bound.warningsPending.map((f) => f.id).sort())
+            ? 'warnings-changed'
+            : 'qc-changed';
+      const res = invalidate.run(reason, t, row.id);
+      if (res.changes) {
+        auditEntries.push({
+          field: `relreq:${row.id}`, action: 'relreq-invalidate', oldValue: row.status,
+          newValue: `invalidated:${reason}（${INVALID_REASON_TEXT[reason] || reason}）`,
+        });
+      }
+    }
+  });
+  txn();
+  if (auditEntries.length) {
+    const headId = store.getProject(projectId).head_id;
+    store.writeAudit(projectId, headId, auditEntries, '系统');
+  }
+}
+
+/**
+ * 创建发布申请。预检必须通过；警告项须随申请逐项确认（与申请一起冻结）。
+ * 幂等：同版本已有待处理/已批准申请时直接返回已有申请（deduplicated=true），
+ *       不产生重复记录；待处理/已批准申请若复检发现已失效则先失效再新建。
+ */
+function createRequest(projectId, { revisionId, confirmations = [], message = '', author }) {
   const project = store.getProject(projectId);
   if (!project) throw httpError(404, '项目不存在');
+  const rev = store.getRevision(revisionId);
+  if (!rev || rev.project_id !== projectId) throw httpError(400, '版本无效');
 
-  // 同一版本重复发布：返回已有快照，不产生重复
-  const existing = db
-    .prepare(`SELECT * FROM releases WHERE project_id=? AND revision_id=? AND status='published'`)
+  // 先做读取时复检：指纹已变化的旧申请在唯一索引上腾位
+  revalidateRequests(projectId, revisionId);
+
+  // 该版本已有有效发布快照：无需再申请（撤销发布后才允许重新申请）
+  const published = db
+    .prepare(`SELECT id,label FROM releases WHERE project_id=? AND revision_id=? AND status='published'`)
     .get(projectId, revisionId);
-  if (existing) return { release: parseRelease(existing), deduplicated: true };
+  if (published) throw httpError(400, `该版本已发布（${published.label}），无需重复申请；如需重发请先撤销原发布`);
 
   const pre = preflight(projectId, revisionId);
   if (!pre.canPublish) {
@@ -451,14 +597,141 @@ function publish(projectId, { revisionId, author, confirmations = [], message = 
   const need = pre.warningsPending.map((w) => w.id);
   const got = new Set(confirmations);
   const missing = need.filter((id) => !got.has(id));
-  if (missing.length) throw httpError(400, '警告级问题需在确认页逐项确认', { missing });
+  const extra = [...got].filter((id) => !need.includes(id));
+  if (missing.length || extra.length) {
+    throw httpError(400, '警告级问题需随申请逐项确认，确认项与预检清单不一致', { missing, extra });
+  }
 
+  const existing = db
+    .prepare(`SELECT * FROM release_requests WHERE project_id=? AND revision_id=? AND ${ACTIVE_REQ}`)
+    .get(projectId, revisionId);
+  if (existing) return { request: parseRequest(existing), deduplicated: true };
+
+  const id = rqid();
+  const t = now();
+  const payload = {
+    id, project_id: projectId, revision_id: revisionId, head_rev_id: pre.headRevId,
+    preflight: JSON.stringify(pre), fingerprint: pre.fingerprint,
+    confirmations: JSON.stringify(need),
+    message: String(message || ''), applicant: author, created_at: t,
+  };
+  db.prepare(
+    `INSERT INTO release_requests
+       (id, project_id, revision_id, head_rev_id, status, preflight, fingerprint, confirmations,
+        message, applicant, reviewer, review_comment, invalid_reason, created_at, reviewed_at, invalidated_at, published_at, release_id)
+     VALUES (@id, @project_id, @revision_id, @head_rev_id, 'pending', @preflight, @fingerprint, @confirmations,
+        @message, @applicant, NULL, NULL, NULL, @created_at, NULL, NULL, NULL, NULL)`,
+  ).run(payload);
+  store.writeAudit(projectId, revisionId, [
+    {
+      field: `relreq:${id}`, action: 'relreq-submit', oldValue: null,
+      newValue: JSON.stringify({
+        revisionId, headRevId: pre.headRevId, fingerprint: pre.fingerprint,
+        jobId: pre.job.id, warningsConfirmed: need.length, message: String(message || ''),
+      }),
+    },
+  ], author);
+  return { request: getRequest(id), deduplicated: false };
+}
+
+/** 统一的审核入口：条件更新保证并发下同一申请不会被重复批准/驳回或批准后再驳回。 */
+function decideRequest(projectId, requestId, { action, comment = '', author }) {
+  if (!['approve', 'reject'].includes(action)) throw httpError(400, 'action 应为 approve 或 reject');
+  const row = db.prepare('SELECT * FROM release_requests WHERE id = ?').get(requestId);
+  if (!row || row.project_id !== projectId) throw httpError(404, '发布申请不存在');
+
+  // 审核前复检：绑定的版本/预检结果已变化则申请失效，审核动作拒绝执行
+  revalidateRequests(projectId, row.revision_id);
+  const cur = getRequest(requestId);
+  if (cur.status === 'invalidated') {
+    throw httpError(409, `申请已失效（${INVALID_REASON_TEXT[cur.invalid_reason] || cur.invalid_reason}），请重新申请`, {
+      invalidated: true, reason: cur.invalid_reason,
+    });
+  }
+  if (action === 'reject' && !String(comment || '').trim()) {
+    throw httpError(400, '驳回必须填写审核意见');
+  }
+  if (cur.status !== 'pending') {
+    throw httpError(409, cur.status === 'approved'
+      ? '申请已批准，不能重复审核'
+      : cur.status === 'rejected'
+        ? '申请已驳回，不能重复审核'
+        : '申请已发布，不能再审核');
+  }
+
+  const next = action === 'approve' ? 'approved' : 'rejected';
+  const t = now();
+  const res = db.prepare(
+    `UPDATE release_requests SET status=?, reviewer=?, review_comment=?, reviewed_at=?
+     WHERE id=? AND status='pending'`,
+  ).run(next, author, String(comment || ''), t, requestId);
+  if (res.changes === 0) {
+    // 并发：另一个审核请求已先落库
+    const winner = getRequest(requestId);
+    throw httpError(409, `申请已被其他审核人${winner.status === 'approved' ? '批准' : '驳回'}，状态以记录为准`, {
+      status: winner.status, reviewer: winner.reviewer,
+    });
+  }
+  store.writeAudit(projectId, row.revision_id, [
+    {
+      field: `relreq:${requestId}`,
+      action: action === 'approve' ? 'relreq-approve' : 'relreq-reject',
+      oldValue: 'pending',
+      newValue: JSON.stringify({ status: next, comment: String(comment || '') }),
+    },
+  ], author);
+  return { request: getRequest(requestId) };
+}
+
+/**
+ * 凭已批准的发布申请生成快照。并发一致性由一个事务保证：
+ *  1) 申请必须存在且属于本项目；
+ *  2) 事务内条件校验申请状态 = approved 且预检指纹与当前一致，否则拒绝
+ *     （批准后版本/预检结果发生变化会先经读取时复检置为 invalidated）；
+ *  3) 同版本已有 published 快照（另一个请求/并发先发）→ 幂等返回已有快照。
+ * 警告项在发布时落「逐项确认」状态，申请随后标记 published 并关联快照。
+ */
+function publish(projectId, { requestId, author }) {
+  const project = store.getProject(projectId);
+  if (!project) throw httpError(404, '项目不存在');
+  const reqRow = db.prepare('SELECT * FROM release_requests WHERE id = ?').get(requestId);
+  if (!reqRow || reqRow.project_id !== projectId) throw httpError(404, '发布申请不存在');
+
+  // 发布前复检：绑定的版本/预检结果已变化则申请自动失效，发布被拒绝
+  revalidateRequests(projectId, reqRow.revision_id);
+  const fresh = getRequest(requestId);
+  if (fresh.status === 'invalidated') {
+    throw httpError(409, `申请已失效（${INVALID_REASON_TEXT[fresh.invalid_reason] || fresh.invalid_reason}），请重新申请`, {
+      invalidated: true, reason: fresh.invalid_reason,
+    });
+  }
+
+  // 同一版本重复发布：返回已有快照，不产生重复
+  const existing = db
+    .prepare(`SELECT * FROM releases WHERE project_id=? AND revision_id=? AND status='published'`)
+    .get(projectId, reqRow.revision_id);
+  if (existing) return { release: parseRelease(existing), deduplicated: true, requestId };
+
+  const bound = fresh.preflight;
+  const revisionId = reqRow.revision_id;
   const rev = store.getRevision(revisionId);
+  const pre = preflight(projectId, revisionId);
+  if (!pre.canPublish || pre.fingerprint !== bound.fingerprint) {
+    // 复检之后、入事务之前预检发生变化：懒失效并拒绝发布
+    revalidateRequests(projectId, revisionId);
+    const after = getRequest(requestId);
+    throw httpError(409, after.status === 'invalidated'
+      ? `申请已失效（${INVALID_REASON_TEXT[after.invalid_reason] || after.invalid_reason}），请重新申请`
+      : '申请绑定的预检结果已变化，请重新申请',
+    { invalidated: after.status === 'invalidated', reason: after.invalid_reason });
+  }
   const frozenRules = rules.expandRules(getScopedRules(projectId), rev.snapshot.tracks);
   const allFindings = db.prepare('SELECT * FROM qc_findings WHERE job_id = ?').all(pre.job.id).map(parseFinding);
   const headId = project.head_id;
   const countBy = (sev) => allFindings.filter((f) => f.severity === sev);
+  const warningNeed = pre.warningsPending.map((w) => w.id);
   const qcSummary = {
+    requestId,
     jobId: pre.job.id,
     jobRevisionId: revisionId,
     jobFinishedAt: pre.job.finished_at,
@@ -470,11 +743,12 @@ function publish(projectId, { revisionId, author, confirmations = [], message = 
     },
     warning: {
       total: countBy('warning').length,
-      confirmed: need,
+      confirmed: warningNeed,
       ignored: countBy('warning').filter((f) => f.status === 'ignored' && f.decided_on_rev === headId).map((f) => f.id),
     },
     headRevIdAtPublish: headId,
     publishedBy: author,
+    approvedBy: fresh.reviewer,
   };
   const files = exporter.renderFiles(rev.snapshot);
   const seq = db.prepare('SELECT COUNT(*) AS c FROM releases WHERE project_id = ?').get(projectId).c + 1;
@@ -483,8 +757,26 @@ function publish(projectId, { revisionId, author, confirmations = [], message = 
   const t = now();
 
   const txn = db.transaction(() => {
+    // 事务内条件校验：并发审核/发布时只有一个写入能成功
+    const cur = db.prepare(`SELECT * FROM release_requests WHERE id=? AND status='approved'`).get(requestId);
+    if (!cur) {
+      const nowRow = getRequest(requestId);
+      throw httpError(409, nowRow.status === 'published'
+        ? '该申请已发布'
+        : '申请已失效或未获批准，不能发布（请刷新后重新申请/审核）', { status: nowRow.status });
+    }
+    // 事务内最后一次指纹比对（指纹在复检后变化的极窄竞态：直接拒绝，不落不一致状态）
+    const pre2 = preflight(projectId, revisionId);
+    if (!pre2.canPublish || pre2.fingerprint !== cur.fingerprint) {
+      throw httpError(409, '申请绑定的预检结果在发布时发生变化，请重新预检后再发布', { race: true });
+    }
+    const dup = db
+      .prepare(`SELECT id FROM releases WHERE project_id=? AND revision_id=? AND status='published'`)
+      .get(projectId, revisionId);
+    if (dup) return { duplicateOf: dup.id };
+
     // 警告级逐项确认留痕（状态、操作者、关联版本）
-    for (const w of pre.warningsPending) {
+    for (const w of pre2.warningsPending) {
       db.prepare(`UPDATE qc_findings SET status='confirmed', decided_by=?, decided_at=?, decide_reason=?, decided_on_rev=? WHERE id=?`)
         .run(author, t, '发布时逐项确认', headId, w.id);
       insertEvent(projectId, w.id, 'confirm', author, '发布时逐项确认', revisionId, { release: label });
@@ -493,19 +785,31 @@ function publish(projectId, { revisionId, author, confirmations = [], message = 
       `INSERT INTO releases (id, project_id, revision_id, seq, label, snapshot, rules_snapshot, qc_summary, files, status, message, author, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,'published',?,?,?)`,
     ).run(id, projectId, revisionId, seq, label, JSON.stringify(rev.snapshot), JSON.stringify(frozenRules),
-      JSON.stringify(qcSummary), JSON.stringify(files), String(message || ''), author, t);
+      JSON.stringify(qcSummary), JSON.stringify(files), String(reqRow.message || ''), author, t);
+    db.prepare(
+      `UPDATE release_requests SET status='published', published_at=?, release_id=? WHERE id=? AND status='approved'`,
+    ).run(t, id, requestId);
+    return { duplicateOf: null };
   });
-  txn();
+
+  const result = txn();
+  if (result.duplicateOf) {
+    return { release: getRelease(result.duplicateOf), deduplicated: true, requestId };
+  }
 
   const auditEntries = pre.warningsPending.map((w) => ({
     field: `qc:${w.id}`, action: 'qc-confirm', oldValue: w.status, newValue: `confirmed（发布 ${label}）`,
   }));
   auditEntries.push({
+    field: `relreq:${requestId}`, action: 'relreq-publish', oldValue: 'approved',
+    newValue: JSON.stringify({ release: id, label, reviewer: fresh.reviewer }),
+  });
+  auditEntries.push({
     field: `release:${id}`, action: 'publish', oldValue: null,
-    newValue: JSON.stringify({ label, revisionId, jobId: pre.job.id, warningsConfirmed: need.length }),
+    newValue: JSON.stringify({ label, revisionId, requestId, jobId: pre.job.id, warningsConfirmed: warningNeed.length }),
   });
   store.writeAudit(projectId, revisionId, auditEntries, author);
-  return { release: getRelease(id), deduplicated: false };
+  return { release: getRelease(id), deduplicated: false, requestId };
 }
 
 function withdrawRelease(projectId, releaseId, { author, reason }) {
@@ -543,6 +847,10 @@ module.exports = {
   ignoreFindings,
   applyFixes,
   preflight,
+  createRequest,
+  decideRequest,
+  listRequests,
+  getRequest,
   publish,
   withdrawRelease,
   listReleases,

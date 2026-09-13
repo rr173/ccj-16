@@ -208,19 +208,55 @@ app.post('/api/projects/:id/qc/findings/fix', wrap((req, res) => {
   res.status(201).json(result);
 }));
 
-// ---- 发布快照：预检、发布（同版本去重）、列表、撤销、逐句对比、文件下载 ----
+// ---- 发布审批：预检 → 发布申请 → 批准/驳回 →（批准且未失效）发布 ----
 app.get('/api/projects/:id/releases/preflight', wrap((req, res) => {
   res.json(qc.preflight(req.params.id, String(req.query.revisionId || '')));
 }));
 
-app.post('/api/projects/:id/releases', wrap((req, res) => {
+// 创建发布申请（同版本有待处理/已批准申请时幂等返回）
+app.post('/api/projects/:id/release-requests', wrap((req, res) => {
   const { revisionId, confirmations, author, message } = req.body || {};
   if (!revisionId) return res.status(400).json({ error: '缺少 revisionId' });
-  const result = qc.publish(req.params.id, {
+  const result = qc.createRequest(req.params.id, {
     revisionId,
     confirmations: Array.isArray(confirmations) ? confirmations : [],
     author: String(author || '匿名'),
     message: String(message || ''),
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+app.get('/api/projects/:id/release-requests', wrap((req, res) => {
+  res.json({ requests: qc.listRequests(req.params.id) });
+}));
+
+app.post('/api/release-requests/:rid/approve', wrap((req, res) => {
+  const rq = qc.getRequest(req.params.rid);
+  if (!rq) return res.status(404).json({ error: '发布申请不存在' });
+  res.json(qc.decideRequest(rq.project_id, req.params.rid, {
+    action: 'approve',
+    comment: String(req.body?.comment || ''),
+    author: String(req.body?.author || '匿名'),
+  }));
+}));
+
+app.post('/api/release-requests/:rid/reject', wrap((req, res) => {
+  const rq = qc.getRequest(req.params.rid);
+  if (!rq) return res.status(404).json({ error: '发布申请不存在' });
+  res.json(qc.decideRequest(rq.project_id, req.params.rid, {
+    action: 'reject',
+    comment: String(req.body?.comment || ''),
+    author: String(req.body?.author || '匿名'),
+  }));
+}));
+
+// ---- 发布快照：凭已批准的申请发布（同版本去重）、列表、撤销、逐句对比、文件下载 ----
+app.post('/api/projects/:id/releases', wrap((req, res) => {
+  const { requestId, author } = req.body || {};
+  if (!requestId) return res.status(400).json({ error: '缺少 requestId（需先提交发布申请并获得批准）' });
+  const result = qc.publish(req.params.id, {
+    requestId,
+    author: String(author || '匿名'),
   });
   res.status(result.deduplicated ? 200 : 201).json(result);
 }));

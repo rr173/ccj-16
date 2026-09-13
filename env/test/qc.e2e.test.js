@@ -101,11 +101,11 @@ const c3Line = f1.findings.find((x) => x.cue_id === 'c3' && x.rule_key === 'line
 ok(c1F.evidence.includes('200ms') && c1F.suggestion.safe === true, '结果含证据与安全建议');
 ok(c1F.basis.start === 0 && c1F.basis.end === 200, '结果记录句子基准值');
 
-// 发布门禁：阻断未处理 → 不能发布
+// 发布门禁：阻断未处理 → 预检不通过、不能提交发布申请
 const pre0 = await j('GET', `/api/projects/${pid}/releases/preflight?revisionId=${rev1.id}`);
 ok(pre0.data.canPublish === false && pre0.data.blockerUnhandled.length === 2, '预检：阻断未处理不可发布');
-const pubEarly = await j('POST', `/api/projects/${pid}/releases`, { revisionId: rev1.id, author: 'alice', confirmations: [] });
-ok(pubEarly.status === 400, '阻断未处理时发布被拒绝');
+const pubEarly = await j('POST', `/api/projects/${pid}/release-requests`, { revisionId: rev1.id, author: 'alice', confirmations: [] });
+ok(pubEarly.status === 400, '阻断未处理时提交发布申请被拒绝');
 
 // 自动修复（安全项）→ 生成 qcfix 版本
 const fix1 = await j('POST', `/api/projects/${pid}/qc/findings/fix`, {
@@ -153,24 +153,70 @@ await j('POST', `/api/projects/${pid}/qc/findings/decide`, {
   findingIds: [c1F2.id], action: 'ignore', reason: '确认保留', baseRevId: rev3.id, author: 'alice',
 });
 
-// 发布：警告需逐项确认
+// 发布：警告需随申请逐项确认
 const pre1 = (await j('GET', `/api/projects/${pid}/releases/preflight?revisionId=${rev3.id}`)).data;
-ok(pre1.canPublish === true && pre1.warningsPending.length === 2, '预检通过，2 条警告待确认');
-const pubNoConfirm = await j('POST', `/api/projects/${pid}/releases`, { revisionId: rev3.id, author: 'alice', confirmations: [] });
-ok(pubNoConfirm.status === 400 && pubNoConfirm.data.missing.length === 2, '未逐项确认警告不能发布');
-const pub1 = await j('POST', `/api/projects/${pid}/releases`, {
+ok(pre1.canPublish === true && pre1.warningsPending.length === 2 && typeof pre1.fingerprint === 'string', '预检通过，2 条警告待确认，含指纹');
+
+// 未批准不能发布
+const noReq = await j('POST', `/api/projects/${pid}/releases`, { requestId: 'rq_nonexistent', author: 'alice' });
+ok(noReq.status === 404, '没有申请不能发布');
+
+// 警告未逐项确认 → 申请被拒
+const appNoConfirm = await j('POST', `/api/projects/${pid}/release-requests`, { revisionId: rev3.id, author: 'alice', confirmations: [], message: '首发' });
+ok(appNoConfirm.status === 400 && appNoConfirm.data.missing.length === 2, '未逐项确认警告不能提交申请');
+
+// 驳回必须填写意见
+const app1 = await j('POST', `/api/projects/${pid}/release-requests`, {
   revisionId: rev3.id, author: 'alice', confirmations: pre1.warningsPending.map((w) => w.id), message: '首发',
 });
-ok(pub1.status === 201 && pub1.data.release.label === 'REL-001', '发布成功，生成唯一标识 REL-001');
+ok(app1.status === 201 && app1.data.request.status === 'pending', '发布申请已提交（pending，绑定版本与预检结果）');
+const rq1 = app1.data.request.id;
+ok(app1.data.request.preflight.fingerprint === pre1.fingerprint, '申请冻结了预检结果与指纹');
+
+// 重复提交 → 幂等返回同一申请
+const app1Dup = await j('POST', `/api/projects/${pid}/release-requests`, {
+  revisionId: rev3.id, author: 'bob', confirmations: pre1.warningsPending.map((w) => w.id),
+});
+ok(app1Dup.status === 200 && app1Dup.data.deduplicated === true && app1Dup.data.request.id === rq1, '重复提交申请幂等返回');
+
+const rejectNoReason = await j('POST', `/api/release-requests/${rq1}/reject`, { author: 'rev1', comment: '' });
+ok(rejectNoReason.status === 400, '驳回不填意见被拒绝');
+
+// 驳回 → 状态与意见/时间/署名留痕
+const reject1 = await j('POST', `/api/release-requests/${rq1}/reject`, { author: 'rev1', comment: '请再核对 c1' });
+ok(reject1.status === 200 && reject1.data.request.status === 'rejected' && reject1.data.request.reviewer === 'rev1', '申请被驳回并留痕');
+// 已驳回不能批准、不能重复驳回
+const rejApprove = await j('POST', `/api/release-requests/${rq1}/approve`, { author: 'rev1' });
+const rejAgain = await j('POST', `/api/release-requests/${rq1}/reject`, { author: 'rev1', comment: 'x' });
+ok(rejApprove.status === 409 && rejAgain.status === 409, '已驳回申请不能再批准或重复驳回');
+const pubRejected = await j('POST', `/api/projects/${pid}/releases`, { requestId: rq1, author: 'alice' });
+ok(pubRejected.status === 409, '已驳回申请不能发布');
+
+// 重新申请（驳回后允许同版本重新提交）
+const app2 = await j('POST', `/api/projects/${pid}/release-requests`, {
+  revisionId: rev3.id, author: 'alice', confirmations: pre1.warningsPending.map((w) => w.id), message: '首发v2',
+});
+ok(app2.status === 201 && app2.data.request.id !== rq1 && app2.data.request.status === 'pending', '驳回后可重新申请（新记录）');
+const rq2 = app2.data.request.id;
+const approve1 = await j('POST', `/api/release-requests/${rq2}/approve`, { author: 'rev2', comment: '同意发布' });
+ok(approve1.status === 200 && approve1.data.request.status === 'approved' && approve1.data.request.reviewed_at > 0, '申请获批准，审核人/意见/时间留痕');
+// 不能重复批准、批准后不能驳回
+const appAgain = await j('POST', `/api/release-requests/${rq2}/approve`, { author: 'rev3' });
+const appThenRej = await j('POST', `/api/release-requests/${rq2}/reject`, { author: 'rev3', comment: '反悔' });
+ok(appAgain.status === 409 && appThenRej.status === 409, '已批准申请不能重复批准或再驳回');
+
+// 发布：凭批准的申请
+const pub1 = await j('POST', `/api/projects/${pid}/releases`, { requestId: rq2, author: 'alice' });
+ok(pub1.status === 201 && pub1.data.release.label === 'REL-001', '批准后发布成功，生成唯一标识 REL-001');
 const rel1 = pub1.data.release;
 ok(rel1.snapshot.cues.length === 5 && rel1.rules_snapshot[''].duration.severity === 'blocker' && rel1.qc_summary.jobId === job2.id,
   '快照冻结句子/规则配置/质检摘要');
 ok(rel1.files.srt.all.includes('00:00:08,000 --> 00:00:18,000') && rel1.files.vtt.all.startsWith('WEBVTT'), '快照内含 SRT/VTT 文件');
+const rq2After = (await j('GET', `/api/projects/${pid}/release-requests`)).data.requests.find((q) => q.id === rq2);
+ok(rq2After.status === 'published' && rq2After.release_id === rel1.id, '申请状态变为已发布并关联快照');
 
-// 重复发布同一版本 → 不产生重复快照
-const pubDup = await j('POST', `/api/projects/${pid}/releases`, {
-  revisionId: rev3.id, author: 'bob', confirmations: [], message: '重复',
-});
+// 重复发布（同一批准申请再发）→ 不产生重复快照
+const pubDup = await j('POST', `/api/projects/${pid}/releases`, { requestId: rq2, author: 'bob' });
 ok(pubDup.status === 200 && pubDup.data.deduplicated === true && pubDup.data.release.id === rel1.id, '同版本重复发布返回已有快照');
 
 // 下载文件
@@ -204,10 +250,17 @@ const reIgnore = await j('POST', `/api/projects/${pid}/qc/findings/decide`, {
   findingIds: [c1F2.id], action: 'ignore', reason: '重新确认保留', baseRevId: headNow, author: 'alice',
 });
 ok(reIgnore.status === 200, '撤销后重新处理过期阻断项');
-const pub2 = await j('POST', `/api/projects/${pid}/releases`, {
-  revisionId: rev3.id, author: 'alice', confirmations: [], message: '重发',
+// 撤销后重新发布：旧申请已 published 终结，需对该版本重新申请→批准→发布
+const preRe = (await j('GET', `/api/projects/${pid}/releases/preflight?revisionId=${rev3.id}`)).data;
+ok(preRe.canPublish === true, '重新处理后预检再次通过');
+const appRe = await j('POST', `/api/projects/${pid}/release-requests`, {
+  revisionId: rev3.id, author: 'alice', confirmations: preRe.warningsPending.map((w) => w.id), message: '重发',
 });
-ok(pub2.status === 201 && pub2.data.release.label === 'REL-002' && pub2.data.release.id !== rel1.id, '撤销后可重新发布（新标识）');
+ok(appRe.status === 201, '撤销后可重新提交申请');
+const apprRe = await j('POST', `/api/release-requests/${appRe.data.request.id}/approve`, { author: 'rev2' });
+ok(apprRe.status === 200, '重新申请获批准');
+const pub2 = await j('POST', `/api/projects/${pid}/releases`, { requestId: appRe.data.request.id, author: 'alice' });
+ok(pub2.status === 201 && pub2.data.release.label === 'REL-002' && pub2.data.release.id !== rel1.id, '撤销后经审批可重新发布（新标识）');
 
 // 修复护栏①：修复会引入新重叠 → 拒绝
 const job3 = await waitJob(pid, (await j('POST', `/api/projects/${pid}/qc/jobs`, { revisionId: rev4.id, author: 'alice' })).data.job.id);
@@ -238,8 +291,9 @@ ok(hist.length >= 3 && allActions.includes('found') && allActions.includes('igno
   'c1 完整历史：found→ignore→stale→ignore');
 
 // 审计追溯
-const audit = (await j('GET', `/api/projects/${pid}/audit?limit=500`)).data.audit.map((a) => a.action);
-for (const act of ['qc-rule', 'qc-run', 'qc-done', 'qc-fix', 'qc-ignore', 'qc-stale', 'qc-confirm', 'publish', 'withdraw']) {
+const audit = (await j('GET', `/api/projects/${pid}/audit?limit=2000`)).data.audit.map((a) => a.action);
+for (const act of ['qc-rule', 'qc-run', 'qc-done', 'qc-fix', 'qc-ignore', 'qc-stale', 'qc-confirm',
+  'relreq-submit', 'relreq-approve', 'relreq-reject', 'relreq-publish', 'publish', 'withdraw']) {
   ok(audit.includes(act), `审计含 ${act}`);
 }
 const revs = (await j('GET', `/api/projects/${pid}/revisions`)).data.revisions;
@@ -272,6 +326,193 @@ const jb3Done = await waitJob(pidB, jb3.job.id);
 ok(jb3Done.status === 'done' && jb3Done.summary.total === 200, '重跑完成，200 条时长过短结果');
 const jobsB = (await j('GET', `/api/projects/${pidB}/qc/jobs`)).data.jobs;
 ok(jobsB.length === 2 && jobsB.filter((x) => x.status === 'cancelled').length === 1, '任务历史完整（去重未产生新任务，含取消）');
+
+/* ---------- 项目 C：发布申请的自动失效（警告变化/阻断重现/新提交）与并发审核一致 ---------- */
+console.log('项目 C：发布申请失效与并发审核');
+const { data: createdC } = await j('POST', '/api/projects', { name: '审批失效与并发', author: 'alice' });
+const pidC = createdC.project.id;
+const cueC1 = { id: 'd1', trackId: 't_main', start: 1000, end: 3000, text: '完全正常的一句对白内容', locked: false };
+const cueC2 = { id: 'd2', trackId: 't_main', start: 3200, end: 5200, text: '另一句同样完全正常的对白', locked: false };
+const revC1 = await submit(pidC, createdC.revision.id, { ...createdC.revision.snapshot, cues: [cueC1, cueC2] }, 'alice', '种子');
+
+async function setRulesC(pid, cfg) {
+  const defaults = {
+    duration: { enabled: false, severity: 'blocker', params: { minMs: 500, maxMs: 10000 } },
+    cps: { enabled: false, severity: 'warning', params: { maxCps: 20 } },
+    line_chars: { enabled: false, severity: 'warning', params: { maxChars: 42 } },
+    gap: { enabled: false, severity: 'warning', params: { minGapMs: 500 } },
+    align: { enabled: false, severity: 'warning', params: { toleranceMs: 120, trackA: '', trackB: '' } },
+  };
+  await j('PUT', `/api/projects/${pid}/qc/rules`, { trackId: '', author: 'alice', rules: { ...defaults, ...cfg } });
+}
+await setRulesC(pidC, { gap: { enabled: true, severity: 'warning', params: { minGapMs: 500 } } });
+const jobC1 = await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC1.id, author: 'alice' })).data.job.id);
+const fC1 = (await j('GET', `/api/projects/${pidC}/qc/jobs/${jobC1.id}/findings`)).data.findings;
+ok(fC1.length === 1 && fC1[0].severity === 'warning', 'C 基线：仅 1 条警告（间隔不足）');
+const preC1 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC1.id}`)).data;
+ok(preC1.canPublish === true && preC1.warningsPending.length === 1, 'C 预检通过，1 条警告待确认');
+
+// ① 警告确认变化 → 待处理申请自动失效
+const reqC1 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC1.id, author: 'alice', confirmations: preC1.warningsPending.map((w) => w.id),
+})).data.request.id;
+await j('POST', `/api/projects/${pidC}/qc/findings/decide`, {
+  findingIds: [fC1[0].id], action: 'ignore', reason: '接受该间隔', baseRevId: revC1.id, author: 'alice',
+});
+const gotC1 = (await j('GET', `/api/projects/${pidC}/release-requests`)).data.requests.find((q) => q.id === reqC1);
+ok(gotC1.status === 'invalidated' && gotC1.invalid_reason === 'warnings-changed',
+  '警告确认项变化 → 申请读取时自动失效', JSON.stringify({ s: gotC1.status, r: gotC1.invalid_reason }));
+ok((await j('POST', `/api/release-requests/${reqC1}/approve`, { author: 'rev' })).status === 409
+  && (await j('POST', `/api/projects/${pidC}/releases`, { requestId: reqC1, author: 'alice' })).status === 409,
+  '失效申请既不能审核也不能发布');
+
+// ② 阻断问题重新出现 → 已批准申请自动失效
+const preC2 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC1.id}`)).data;
+ok(preC2.canPublish === true && preC2.warningsPending.length === 0, '警告被忽略后预检仍通过');
+const reqC2 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC1.id, author: 'alice', confirmations: [],
+})).data.request.id;
+ok((await j('POST', `/api/release-requests/${reqC2}/approve`, { author: 'rev1', comment: '同意' })).status === 200, 'C 申请已批准');
+await setRulesC(pidC, {
+  gap: { enabled: true, severity: 'warning', params: { minGapMs: 500 } },
+  duration: { enabled: true, severity: 'blocker', params: { minMs: 500, maxMs: 1000 } },
+});
+await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC1.id, author: 'alice' })).data.job.id);
+const gotC2 = (await j('GET', `/api/projects/${pidC}/release-requests`)).data.requests.find((q) => q.id === reqC2);
+ok(gotC2.status === 'invalidated' && gotC2.invalid_reason === 'blockers-changed',
+  '阻断问题重新出现 → 已批准申请自动失效', JSON.stringify({ s: gotC2.status, r: gotC2.invalid_reason }));
+ok((await j('POST', `/api/projects/${pidC}/releases`, { requestId: reqC2, author: 'alice' })).status === 409,
+  '批准后预检变化不能发布，需重新申请');
+
+// ③ 版本产生新提交 → 提交钩子自动失效
+await setRulesC(pidC, {}); // 全部规则关闭
+// 旧质检产生的阻断结果仍需重新处理（规则关闭不会改写历史结果）
+const jobC3 = await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC1.id, author: 'alice' })).data.job.id);
+const fC3Open = (await j('GET', `/api/projects/${pidC}/qc/jobs/${jobC3.id}/findings`)).data.findings
+  .filter((x) => ['open', 'stale'].includes(x.status));
+if (fC3Open.length) {
+  await j('POST', `/api/projects/${pidC}/qc/findings/decide`, {
+    findingIds: fC3Open.map((x) => x.id), action: 'ignore', reason: '规则已关闭，保留', baseRevId: revC1.id, author: 'alice',
+  });
+}
+const preC3 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC1.id}`)).data;
+ok(preC3.canPublish === true && preC3.blockerUnhandled.length === 0 && preC3.warningsPending.length === 0, '阻断重新处理后预检通过');
+const reqC3 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC1.id, author: 'alice', confirmations: [],
+})).data.request.id;
+await j('POST', `/api/release-requests/${reqC3}/approve`, { author: 'rev1' });
+const snapC2 = JSON.parse(JSON.stringify(revC1.snapshot));
+snapC2.cues.push({ id: 'd9', trackId: 't_main', start: 9000, end: 11000, text: '后来追加的句子', locked: false });
+const revC2 = await submit(pidC, revC1.id, snapC2, 'carol', '申请后追加提交');
+const gotC3 = (await j('GET', `/api/projects/${pidC}/release-requests`)).data.requests.find((q) => q.id === reqC3);
+ok(gotC3.status === 'invalidated' && gotC3.invalid_reason === 'new-revision',
+  '版本产生新提交 → 已批准申请由提交钩子自动失效', JSON.stringify({ s: gotC3.status, r: gotC3.invalid_reason }));
+const preC4 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC2.id}`)).data;
+ok(preC4.canPublish === false && preC4.job === null, '新版本尚未质检，预检不通过');
+ok((await j('POST', `/api/projects/${pidC}/release-requests`, { revisionId: revC2.id, author: 'alice', confirmations: [] })).status === 400,
+  '预检不通过时新申请被拒绝');
+
+// ④ 并发审核：批准与驳回同时到达，只有一个生效，状态唯一确定
+await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC2.id, author: 'alice' })).data.job.id);
+const preC5 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC2.id}`)).data;
+ok(preC5.canPublish === true, '新版本质检后预检通过');
+const reqC4 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC2.id, author: 'alice', confirmations: preC5.warningsPending.map((w) => w.id),
+})).data.request.id;
+const race = await Promise.all([
+  j('POST', `/api/release-requests/${reqC4}/approve`, { author: 'race-approver' }),
+  j('POST', `/api/release-requests/${reqC4}/reject`, { author: 'race-rejecter', comment: '并发驳回' }),
+]);
+const codes = race.map((r) => r.status).sort();
+ok(codes[0] === 200 && codes[1] === 409, '并发审核：只有一个成功，另一个 409', JSON.stringify(codes));
+const winner = race.find((r) => r.status === 200);
+const loserMsg = race.find((r) => r.status === 409).data.error;
+ok(/已被其他审核人|不能重复审核|已批准|已驳回/.test(loserMsg), '失败方收到并发冲突提示', loserMsg);
+const finC4 = (await j('GET', `/api/projects/${pidC}/release-requests`)).data.requests.find((q) => q.id === reqC4);
+ok((finC4.status === 'approved' && finC4.reviewer === 'race-approver')
+  || (finC4.status === 'rejected' && finC4.reviewer === 'race-rejecter'),
+  '并发后状态唯一确定，署名与最终状态一致', JSON.stringify({ s: finC4.status, by: finC4.reviewer }));
+ok((await j('POST', `/api/release-requests/${reqC4}/approve`, { author: 'late' })).status === 409, '终态后再次审核被拒绝');
+
+// ⑤ 页面记录状态齐全：在后续新版本上依次制造 已发布 / 已驳回 / 已批准 / 待处理
+// （并发的 reqC4：胜者为批准则直接发布；胜者为驳回则重新申请→批准→发布）
+let reqToPublish = reqC4;
+if (finC4.status === 'rejected') {
+  const again = await j('POST', `/api/projects/${pidC}/release-requests`, {
+    revisionId: revC2.id, author: 'alice', confirmations: preC5.warningsPending.map((w) => w.id),
+  });
+  ok(again.status === 201, '并发驳回后可重新申请');
+  await j('POST', `/api/release-requests/${again.data.request.id}/approve`, { author: 'rev2' });
+  reqToPublish = again.data.request.id;
+}
+const pubC0 = await j('POST', `/api/projects/${pidC}/releases`, { requestId: reqToPublish, author: 'alice' });
+ok(pubC0.status === 201 && pubC0.data.release.qc_summary.approvedBy, '批准申请发布成功，摘要含审批人');
+// 已发布版本再申请 → 被唯一门禁拒绝（同版本已有 published 快照）
+const reqAfterPub = await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC2.id, author: 'alice', confirmations: preC5.warningsPending.map((w) => w.id),
+});
+ok(reqAfterPub.status === 400, '已发布版本不能再次申请', reqAfterPub.data?.error);
+
+// 新版本 revC3：一条驳回记录
+const snapC3 = JSON.parse(JSON.stringify(revC2.snapshot));
+snapC3.cues[0].text = '微调第一句';
+const revC3 = await submit(pidC, revC2.id, snapC3, 'alice', '微调');
+await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC3.id, author: 'alice' })).data.job.id);
+const preC6 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC3.id}`)).data;
+ok(preC6.canPublish === true, 'revC3 预检通过');
+const reqC5 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC3.id, author: 'alice', confirmations: preC6.warningsPending.map((w) => w.id),
+})).data.request;
+ok((await j('POST', `/api/release-requests/${reqC5.id}/reject`, { author: 'rev2', comment: '材料不齐' })).status === 200, '驳回记录留痕');
+// 重复提交幂等保护：reqC5 已驳回，可重新申请
+const reqC6 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC3.id, author: 'alice', confirmations: preC6.warningsPending.map((w) => w.id),
+})).data.request;
+// 再重复一次：命中进行中申请，幂等返回同一记录
+const reqC6Dup = await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC3.id, author: 'bob', confirmations: preC6.warningsPending.map((w) => w.id),
+});
+ok(reqC6Dup.status === 200 && reqC6Dup.data.request.id === reqC6.id, '重复提交幂等返回同一申请');
+
+// 新版本 revC4：留一条待处理申请（新提交会把此前的待处理申请失效，故先建版本）
+const snapC4 = JSON.parse(JSON.stringify(revC3.snapshot));
+snapC4.cues.push({ id: 'd10', trackId: 't_main', start: 20000, end: 22000, text: '又一句追加', locked: false });
+const revC4 = await submit(pidC, revC3.id, snapC4, 'alice', '再追加');
+await waitJob(pidC, (await j('POST', `/api/projects/${pidC}/qc/jobs`, { revisionId: revC4.id, author: 'alice' })).data.job.id);
+
+// 此时批准旧版本 revC3 上的 reqC6：它已被新提交失效，批准应被拒绝
+const apprStale = await j('POST', `/api/release-requests/${reqC6.id}/approve`, { author: 'rev2', comment: '晚到的批准' });
+ok(apprStale.status === 409 && apprStale.data.invalidated === true, '新提交后批准旧申请被拒绝（已自动失效）');
+// 重新申请 revC3 并批准——revC3 不是 HEAD，只要预检通过且指纹不变即可
+const preC6b = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC3.id}`)).data;
+const reqC6b = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC3.id, author: 'alice', confirmations: preC6b.warningsPending.map((w) => w.id),
+})).data.request;
+ok((await j('POST', `/api/release-requests/${reqC6b.id}/approve`, { author: 'rev2', comment: '同意' })).status === 200, '重新申请后批准记录留痕');
+
+// revC4 上留一条待处理申请
+const preC7 = (await j('GET', `/api/projects/${pidC}/releases/preflight?revisionId=${revC4.id}`)).data;
+const reqC8 = (await j('POST', `/api/projects/${pidC}/release-requests`, {
+  revisionId: revC4.id, author: 'alice', confirmations: preC7.warningsPending.map((w) => w.id),
+})).data.request;
+ok(reqC8.status === 'pending', '留下一条待处理申请');
+
+const listCAll = (await j('GET', `/api/projects/${pidC}/release-requests`)).data.requests;
+for (const [s, label] of [['pending', '待处理'], ['approved', '已批准'], ['rejected', '已驳回'], ['invalidated', '已失效'], ['published', '已发布']]) {
+  ok(listCAll.some((q) => q.status === s), `审批记录列表含「${label}」状态`);
+}
+// 待处理申请展示申请人/时间；已批准展示审核人/意见/时间
+const pendingRow = listCAll.find((q) => q.status === 'pending');
+const approvedRow = listCAll.find((q) => q.status === 'approved');
+ok(pendingRow.applicant === 'alice' && pendingRow.created_at > 0 && !pendingRow.reviewer, '待处理记录含申请人署名与时间');
+ok(approvedRow.reviewer === 'rev2' && approvedRow.review_comment === '同意' && approvedRow.reviewed_at > 0, '已批准记录含审核人/意见/时间');
+
+// 失效事件同样写审计（含新提交、警告变化、阻断重现三类原因）
+const auditC = (await j('GET', `/api/projects/${pidC}/audit?limit=2000`)).data.audit;
+const invalidateRows = auditC.filter((a) => a.action === 'relreq-invalidate');
+ok(invalidateRows.length >= 4, '申请失效全部写入审计', String(invalidateRows.length));
+ok(new Set(invalidateRows.map((a) => (a.new_value.match(/invalidated:([a-z-]+)/) || [])[1]))
+  .has('new-revision'), '审计可区分 new-revision 失效原因');
 
 console.log(failures === 0 ? '\n质检与发布快照端到端全部通过 ✓' : `\n存在 ${failures} 项失败 ✗`);
 process.exit(failures === 0 ? 0 : 1);

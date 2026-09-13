@@ -128,16 +128,18 @@
           </div>
         </div>
         <div class="tab-pane" data-pane="release">
-          <div class="pane-section-title">从版本创建发布快照</div>
+          <div class="pane-section-title">从版本创建发布快照（预检 → 申请 → 审批 → 发布）</div>
           <div class="new-row">
             <select id="rel-rev-select" style="flex:1"></select>
             <button id="rel-check-btn" class="small-btn">预检</button>
           </div>
           <div id="rel-preflight"></div>
           <div class="new-row">
-            <input id="rel-message" placeholder="发布说明（可选）" style="flex:1" />
-            <button id="rel-publish-btn" class="small-btn primary" disabled>确认并发布</button>
+            <input id="rel-message" placeholder="发布说明（可选，随申请提交）" style="flex:1" />
+            <button id="rel-apply-btn" class="small-btn primary" disabled>提交发布申请</button>
           </div>
+          <div class="pane-section-title">审批记录</div>
+          <div id="rel-requests"></div>
           <div class="pane-section-title">发布历史</div>
           <div id="rel-list"></div>
         </div>

@@ -223,6 +223,8 @@ export async function renderAudit() {
       add: '新增', edit: '修改', delete: '删除', resolve: '冲突裁决', restore: '恢复', skip: '跳过', rollback: '回滚',
       'qc-rule': '质检规则', 'qc-run': '发起质检', 'qc-done': '质检完成', 'qc-cancel': '取消质检',
       'qc-ignore': '质检忽略', 'qc-fix': '质检修复', 'qc-stale': '处理过期', 'qc-confirm': '发布确认',
+      'relreq-submit': '提交发布申请', 'relreq-approve': '批准发布申请', 'relreq-reject': '驳回发布申请',
+      'relreq-publish': '申请生成发布', 'relreq-invalidate': '申请自动失效',
       publish: '发布快照', withdraw: '撤销发布',
     }[a.action] || a.action;
     div.innerHTML = `
