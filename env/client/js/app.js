@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { state, loadProject, subscribe, setDirty } from './state.js';
+import { state, loadProject, subscribe, setDirty, emit } from './state.js';
 import { initTimeline, renderTimeline, scrollToCue } from './timeline.js';
 import { initPlayer, seek, pause } from './player.js';
 import { initSidebar, renderCueList, renderTrackList, renderTrackToggles, renderHistory, renderAudit } from './sidebar.js';
@@ -7,6 +7,7 @@ import { openConflictModal } from './conflict.js';
 import { initImportModal } from './importer.js';
 import { initQc, closeQcHistory } from './qc.js';
 import { initRelease } from './release.js';
+import { initDiffReport, refreshDiffReports } from './diffreport.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -201,6 +202,17 @@ const handlers = {
   },
   refreshHistory: renderHistory,
   refreshAudit: renderAudit,
+  // 差异报告「定位」：跳到对应版本并选中句子（发布快照落到其来源版本）
+  async locateCue(revId, cueId) {
+    pause();
+    if (state.viewingRevId !== revId) {
+      await openProject(state.project.id, { revisionId: revId });
+      renderHistory();
+    }
+    state.selectedCueId = cueId;
+    document.querySelector('.tabs button[data-tab="cues"]').click();
+    emit('select');
+  },
 };
 window.appHandlers = handlers;
 
@@ -230,6 +242,7 @@ function bind() {
     onFixed: () => { renderAll(); renderHistory(); },
   });
   initRelease({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
+  initDiffReport({ toast, getAuthor, refreshAudit: renderAudit, locateCue: handlers.locateCue });
   $('#qc-history-close').addEventListener('click', closeQcHistory);
 
   subscribe((reason) => {

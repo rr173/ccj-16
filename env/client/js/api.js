@@ -52,4 +52,12 @@ export const api = {
   releaseList: (id) => request('GET', `/api/projects/${id}/releases`),
   releaseWithdraw: (rid, payload) => request('POST', `/api/releases/${rid}/withdraw`, payload),
   releaseDiff: (rid, against) => request('GET', `/api/releases/${rid}/diff?against=${against}`),
+  // ---- 版本差异报告 ----
+  diffReportCreate: (id, payload) => request('POST', `/api/projects/${id}/diff-reports`, payload),
+  diffReportList: (id) => request('GET', `/api/projects/${id}/diff-reports`),
+  diffReportGet: (rid, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v)).toString();
+    return request('GET', `/api/diff-reports/${rid}${qs ? '?' + qs : ''}`);
+  },
+  diffReportDelete: (rid, author) => request('DELETE', `/api/diff-reports/${rid}`, { author }),
 };

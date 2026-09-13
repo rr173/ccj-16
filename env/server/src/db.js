@@ -186,6 +186,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_relreq_active
 -- 同一版本只允许存在一个有效发布：重复发布命中该索引时返回已有快照，不产生重复
 CREATE UNIQUE INDEX IF NOT EXISTS uq_release_published
   ON releases(project_id, revision_id) WHERE status = 'published';
+
+-- ============ 版本差异报告 ============
+-- 生成时冻结比较双方（历史版本或发布快照）的快照内容与生成时间；
+-- 软删除后内容清空不可再读，但行保留用于审计追溯
+CREATE TABLE IF NOT EXISTS diff_reports (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL,
+  from_kind     TEXT NOT NULL,          -- revision | release
+  from_ref      TEXT NOT NULL,          -- 版本 id 或发布快照 id
+  from_label    TEXT NOT NULL,
+  from_rev_id   TEXT NOT NULL,          -- 定位链接落到的版本（快照取其来源版本）
+  to_kind       TEXT NOT NULL,
+  to_ref        TEXT NOT NULL,
+  to_label      TEXT NOT NULL,
+  to_rev_id     TEXT NOT NULL,
+  filters       TEXT NOT NULL,          -- 生成时冻结的筛选条件 {trackId,types,keyword}
+  filter_hash   TEXT NOT NULL,
+  pair_hash     TEXT NOT NULL,          -- 版本对指纹
+  from_snapshot TEXT NOT NULL,          -- 冻结的比较双方内容
+  to_snapshot   TEXT NOT NULL,
+  items         TEXT NOT NULL,          -- 全量差异项（筛选在读取/导出时应用）
+  summary       TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'active', -- active | deleted
+  author        TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,       -- 生成时间（随报告冻结）
+  deleted_by    TEXT,
+  deleted_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_diffreport_project ON diff_reports(project_id, created_at);
+-- 幂等：同一项目 + 同一对版本 + 同一组筛选条件只存在一个有效报告，重复生成返回同一报告
+CREATE UNIQUE INDEX IF NOT EXISTS uq_diffreport_active
+  ON diff_reports(project_id, pair_hash, filter_hash) WHERE status = 'active';
 `);
 
 // 旧库迁移：revisions.meta（导入/回滚清单）

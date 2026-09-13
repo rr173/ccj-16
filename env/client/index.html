@@ -150,6 +150,23 @@
             <button id="back-head-btn" class="small-btn" style="margin-top:6px;">返回最新版本</button>
           </div>
           <div id="rev-list"></div>
+
+          <div class="pane-section-title">版本差异报告（任意两版本 / 发布快照对比）</div>
+          <div class="dr-compare">
+            <div class="new-row">
+              <select id="dr-from" style="flex:1"></select>
+              <span style="align-self:center">→</span>
+              <select id="dr-to" style="flex:1"></select>
+            </div>
+            <div class="qc-filters">
+              <select id="dr-filter-track"><option value="">全部轨道</option></select>
+              <input id="dr-filter-keyword" placeholder="关键词（可选）" style="flex:1;min-width:90px" />
+            </div>
+            <div class="qc-filters" id="dr-type-checks"></div>
+            <button id="dr-create-btn" class="small-btn primary">生成对比报告</button>
+            <span style="color:var(--muted);font-size:11px">相同版本对 + 相同筛选重复生成会复用同一报告</span>
+          </div>
+          <div id="dr-list"></div>
         </div>
         <div class="tab-pane" data-pane="audit">
           <div id="audit-list"></div>
@@ -228,6 +245,40 @@
       <div id="qc-history-body"></div>
       <div class="modal-footer">
         <button id="qc-history-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 版本差异报告详情弹窗 -->
+  <div class="modal-mask" id="dr-modal">
+    <div class="modal wide">
+      <h2 id="dr-modal-title">版本差异报告</h2>
+      <div id="dr-modal-meta" class="import-meta"></div>
+      <div class="qc-filters">
+        <select id="dr-modal-track"></select>
+        <select id="dr-modal-type">
+          <option value="">全部类型</option>
+          <option value="added">新增</option>
+          <option value="deleted">删除</option>
+          <option value="track">跨轨移动</option>
+          <option value="time">时间修改</option>
+          <option value="text">文本修改</option>
+          <option value="lock">锁定状态修改</option>
+          <option value="unchanged">未变化</option>
+        </select>
+        <input id="dr-modal-keyword" placeholder="关键词" style="flex:1;min-width:100px" />
+        <button id="dr-modal-apply" class="small-btn primary">应用筛选</button>
+      </div>
+      <div class="qc-filters">
+        <button id="dr-export-json" class="small-btn">导出 JSON</button>
+        <button id="dr-export-csv" class="small-btn">导出 CSV</button>
+        <span id="dr-modal-count" style="color:var(--muted);font-size:12px"></span>
+      </div>
+      <div class="import-table-wrap" style="max-height:52vh">
+        <table class="import-table" id="dr-table"></table>
+      </div>
+      <div class="modal-footer">
+        <button id="dr-modal-close">关闭</button>
       </div>
     </div>
   </div>

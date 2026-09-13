@@ -3,6 +3,7 @@ const path = require('path');
 const express = require('express');
 const store = require('./store');
 const qc = require('./qc/store');
+const diffreport = require('./report/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -296,6 +297,54 @@ app.get('/api/releases/:rid/files/:fmt/:trackId', wrap((req, res) => {
   res.setHeader('Content-Type', fmt === 'vtt' ? 'text/vtt; charset=utf-8' : 'application/x-subrip; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${rel.label}_${trackId}.${fmt}"`);
   res.send(content);
+}));
+
+/* ==================== 版本差异报告 ==================== */
+
+// 生成报告：任意两个历史版本或发布快照；同版本对 + 同筛选条件幂等返回同一报告
+app.post('/api/projects/:id/diff-reports', wrap((req, res) => {
+  const { fromKind, fromRef, toKind, toRef, filters, author } = req.body || {};
+  const result = diffreport.createReport(req.params.id, {
+    fromKind, fromRef, toKind, toRef,
+    filters: filters || {},
+    author: String(author || '匿名'),
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+app.get('/api/projects/:id/diff-reports', wrap((req, res) => {
+  res.json({ reports: diffreport.listReports(req.params.id) });
+}));
+
+// 详情：可用 trackId / types（逗号分隔）/ keyword 覆盖冻结筛选；每次查看写审计
+app.get('/api/diff-reports/:rid', wrap((req, res) => {
+  const hasOverride = ['trackId', 'types', 'keyword'].some((k) => req.query[k] != null && req.query[k] !== '');
+  res.json(diffreport.getReport(req.params.rid, {
+    filterOverrides: hasOverride
+      ? { trackId: req.query.trackId, types: req.query.types, keyword: req.query.keyword }
+      : null,
+    author: String(req.query.author || '匿名'),
+  }));
+}));
+
+// 导出当前筛选结果（json / csv），写审计
+app.get('/api/diff-reports/:rid/export', wrap((req, res) => {
+  const hasOverride = ['trackId', 'types', 'keyword'].some((k) => req.query[k] != null && req.query[k] !== '');
+  const out = diffreport.exportReport(req.params.rid, {
+    format: req.query.format,
+    filterOverrides: hasOverride
+      ? { trackId: req.query.trackId, types: req.query.types, keyword: req.query.keyword }
+      : null,
+    author: String(req.query.author || '匿名'),
+  });
+  res.setHeader('Content-Type', out.contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+  res.send(out.content);
+}));
+
+// 删除：软删除并清空内容，此后内容不可再读（410），审计保留
+app.delete('/api/diff-reports/:rid', wrap((req, res) => {
+  res.json(diffreport.deleteReport(req.params.rid, String(req.body?.author || '匿名')));
 }));
 
 const PORT = Number(process.env.PORT) || 3000;

@@ -226,6 +226,7 @@ export async function renderAudit() {
       'relreq-submit': '提交发布申请', 'relreq-approve': '批准发布申请', 'relreq-reject': '驳回发布申请',
       'relreq-publish': '申请生成发布', 'relreq-invalidate': '申请自动失效',
       publish: '发布快照', withdraw: '撤销发布',
+      'diff-create': '生成差异报告', 'diff-view': '查看差异报告', 'diff-export': '导出差异报告', 'diff-delete': '删除差异报告',
     }[a.action] || a.action;
     div.innerHTML = `
       <div><span class="field">${escapeHtml(a.field)}</span> · ${actionLabel}</div>
