@@ -70,6 +70,8 @@
         <div class="tabs">
           <button data-tab="cues" class="active">句子</button>
           <button data-tab="tracks">轨道</button>
+          <button data-tab="qc">质检</button>
+          <button data-tab="release">发布</button>
           <button data-tab="history">版本</button>
           <button data-tab="audit">审计</button>
         </div>
@@ -85,6 +87,59 @@
           <button id="add-track-btn" class="small-btn" style="margin-bottom:10px;">+ 新轨道</button>
           <div id="track-list"></div>
           <p style="color:var(--muted);font-size:11px;">同一互斥组中的轨道，任何时刻最多只允许一条字幕同时出现。</p>
+        </div>
+        <div class="tab-pane" data-pane="qc">
+          <div class="pane-section-title">质量规则（项目级默认）</div>
+          <div id="qc-project-rules"></div>
+          <button id="qc-save-project-rules" class="small-btn" style="margin:4px 0 10px">保存项目规则</button>
+          <div class="pane-section-title">轨道级覆盖</div>
+          <div class="new-row"><select id="qc-track-select" style="flex:1"></select></div>
+          <div id="qc-track-rules"></div>
+          <button id="qc-save-track-rules" class="small-btn" style="margin:4px 0 10px">保存轨道规则</button>
+
+          <div class="pane-section-title">质检任务</div>
+          <div class="new-row">
+            <select id="qc-rev-select" style="flex:1"></select>
+            <button id="qc-run-btn" class="small-btn primary">开始质检</button>
+          </div>
+          <div id="qc-jobs"></div>
+
+          <div id="qc-findings-panel" style="display:none">
+            <div class="pane-section-title">质检结果 <span id="qc-findings-count" style="text-transform:none"></span></div>
+            <div id="qc-stale-banner" class="qc-stale-banner" style="display:none">
+              该结果基于旧版本：忽略/修复只对当前最新版本生效；项目产生新版本后，旧处理决定会被标记为「已过期」，需重新选择。
+            </div>
+            <div class="qc-filters">
+              <select id="qc-filter-track"></select>
+              <select id="qc-filter-severity">
+                <option value="">全部级别</option><option value="blocker">阻断</option><option value="warning">警告</option>
+              </select>
+              <select id="qc-filter-status">
+                <option value="">全部状态</option><option value="open">待处理</option><option value="ignored">已忽略</option>
+                <option value="fixed">已修复</option><option value="stale">已过期</option><option value="confirmed">已确认</option>
+              </select>
+            </div>
+            <div class="qc-filters">
+              <label><input type="checkbox" id="qc-check-all" /> 全选</label>
+              <button id="qc-batch-ignore" class="small-btn">批量忽略…</button>
+              <button id="qc-batch-fix" class="small-btn">批量接受修复</button>
+            </div>
+            <div id="qc-findings"></div>
+          </div>
+        </div>
+        <div class="tab-pane" data-pane="release">
+          <div class="pane-section-title">从版本创建发布快照</div>
+          <div class="new-row">
+            <select id="rel-rev-select" style="flex:1"></select>
+            <button id="rel-check-btn" class="small-btn">预检</button>
+          </div>
+          <div id="rel-preflight"></div>
+          <div class="new-row">
+            <input id="rel-message" placeholder="发布说明（可选）" style="flex:1" />
+            <button id="rel-publish-btn" class="small-btn primary" disabled>确认并发布</button>
+          </div>
+          <div class="pane-section-title">发布历史</div>
+          <div id="rel-list"></div>
         </div>
         <div class="tab-pane" data-pane="history">
           <div id="viewing-banner" style="display:none; margin-bottom:10px; padding:8px; border:1px solid var(--warn); border-radius:6px; color:var(--warn);">
@@ -160,6 +215,17 @@
           <button id="import-cancel">取消整个导入</button>
           <button class="primary" id="import-apply-btn">应用勾选项</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 质检历史弹窗 -->
+  <div class="modal-mask" id="qc-history-modal">
+    <div class="modal">
+      <h2 id="qc-history-title">质检历史</h2>
+      <div id="qc-history-body"></div>
+      <div class="modal-footer">
+        <button id="qc-history-close">关闭</button>
       </div>
     </div>
   </div>

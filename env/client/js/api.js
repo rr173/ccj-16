@@ -28,4 +28,24 @@ export const api = {
   importCommit: (id, payload) => request('POST', `/api/projects/${id}/import/commit`, payload),
   importResolve: (id, payload) => request('POST', `/api/projects/${id}/import/resolve`, payload),
   importUndo: (id, payload) => request('POST', `/api/projects/${id}/import/undo`, payload),
+  // ---- 交付质检与发布快照 ----
+  qcGetRules: (id) => request('GET', `/api/projects/${id}/qc/rules`),
+  qcPutRules: (id, payload) => request('PUT', `/api/projects/${id}/qc/rules`, payload),
+  qcStartJob: (id, payload) => request('POST', `/api/projects/${id}/qc/jobs`, payload),
+  qcListJobs: (id) => request('GET', `/api/projects/${id}/qc/jobs`),
+  qcGetJob: (id, jobId) => request('GET', `/api/projects/${id}/qc/jobs/${jobId}`),
+  qcCancelJob: (id, jobId, author) => request('POST', `/api/projects/${id}/qc/jobs/${jobId}/cancel`, { author }),
+  qcFindings: (id, jobId, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v)).toString();
+    return request('GET', `/api/projects/${id}/qc/jobs/${jobId}/findings${qs ? '?' + qs : ''}`);
+  },
+  qcFinding: (id, findingId) => request('GET', `/api/projects/${id}/qc/findings/${findingId}`),
+  qcCueHistory: (id, cueId) => request('GET', `/api/projects/${id}/qc/cues/${cueId}/history`),
+  qcDecide: (id, payload) => request('POST', `/api/projects/${id}/qc/findings/decide`, payload),
+  qcFix: (id, payload) => request('POST', `/api/projects/${id}/qc/findings/fix`, payload),
+  releasePreflight: (id, revisionId) => request('GET', `/api/projects/${id}/releases/preflight?revisionId=${revisionId}`),
+  releasePublish: (id, payload) => request('POST', `/api/projects/${id}/releases`, payload),
+  releaseList: (id) => request('GET', `/api/projects/${id}/releases`),
+  releaseWithdraw: (rid, payload) => request('POST', `/api/releases/${rid}/withdraw`, payload),
+  releaseDiff: (rid, against) => request('GET', `/api/releases/${rid}/diff?against=${against}`),
 };

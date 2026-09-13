@@ -5,6 +5,8 @@ import { initPlayer, seek, pause } from './player.js';
 import { initSidebar, renderCueList, renderTrackList, renderTrackToggles, renderHistory, renderAudit } from './sidebar.js';
 import { openConflictModal } from './conflict.js';
 import { initImportModal } from './importer.js';
+import { initQc, closeQcHistory } from './qc.js';
+import { initRelease } from './release.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -221,6 +223,14 @@ function bind() {
   initPlayer();
   initSidebar(handlers);
   initImportModal({ onCommitted: afterCommit, getAuthor, toast });
+  initQc({
+    toast,
+    getAuthor,
+    refreshHistory: renderHistory,
+    onFixed: () => { renderAll(); renderHistory(); },
+  });
+  initRelease({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
+  $('#qc-history-close').addEventListener('click', closeQcHistory);
 
   subscribe((reason) => {
     if (['drag', 'cue-edit', 'tracks', 'select', 'load'].includes(reason)) {

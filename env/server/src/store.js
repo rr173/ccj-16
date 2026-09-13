@@ -38,6 +38,10 @@ const insertRevision = db.prepare(
 );
 const setHead = db.prepare('UPDATE projects SET head_id = ? WHERE id = ?');
 
+// 提交钩子：每次产生新版本后触发（质检模块借此把基于旧版本的处理决定标记为过期）
+const commitHooks = [];
+function onCommit(fn) { commitHooks.push(fn); }
+
 function commitRevision({ projectId, parent1, parent2, kind, snapshot, author, message, auditAgainst, extraAudit, meta }) {
   const id = rid();
   insertRevision.run({
@@ -59,7 +63,9 @@ function commitRevision({ projectId, parent1, parent2, kind, snapshot, author, m
   if (Array.isArray(extraAudit) && extraAudit.length) {
     writeAudit(projectId, id, extraAudit, author);
   }
-  return getRevision(id);
+  const rev = getRevision(id);
+  for (const fn of commitHooks) fn({ projectId, revision: rev, author });
+  return rev;
 }
 
 function createProject(name, author) {
@@ -557,4 +563,8 @@ module.exports = {
   listRevisions,
   listAudit,
   listProjects,
+  commitRevision,
+  writeAudit,
+  onCommit,
+  httpError,
 };

@@ -2,6 +2,7 @@
 const path = require('path');
 const express = require('express');
 const store = require('./store');
+const qc = require('./qc/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -129,6 +130,136 @@ app.get('/api/revisions/:revId/violations', wrap((req, res) => {
   const rev = store.getRevision(req.params.revId);
   if (!rev) return res.status(404).json({ error: '版本不存在' });
   res.json(validate(rev.snapshot));
+}));
+
+/* ==================== 交付质检与发布快照 ==================== */
+
+// ---- 质量规则：项目级（trackId=''）与轨道级覆盖 ----
+app.get('/api/projects/:id/qc/rules', wrap((req, res) => {
+  res.json(qc.getRulesPayload(req.params.id));
+}));
+
+app.put('/api/projects/:id/qc/rules', wrap((req, res) => {
+  const { trackId, rules, author } = req.body || {};
+  try {
+    res.json(qc.putRules(req.params.id, { trackId: String(trackId || ''), rules, author: String(author || '匿名') }));
+  } catch (e) {
+    if (!e.status) e.status = 400; // 规则参数校验错误
+    throw e;
+  }
+}));
+
+// ---- 质检任务：发起（同版本同规则运行中去重）、进度、取消、历史 ----
+app.post('/api/projects/:id/qc/jobs', wrap((req, res) => {
+  const { revisionId, author } = req.body || {};
+  if (!revisionId) return res.status(400).json({ error: '缺少 revisionId' });
+  const result = qc.startJob(req.params.id, { revisionId, author: String(author || '匿名') });
+  res.status(result.deduplicated ? 200 : 202).json(result);
+}));
+
+app.get('/api/projects/:id/qc/jobs', wrap((req, res) => {
+  res.json({ jobs: qc.listJobs(req.params.id) });
+}));
+
+app.get('/api/projects/:id/qc/jobs/:jobId', wrap((req, res) => {
+  const job = qc.getJob(req.params.jobId);
+  if (!job || job.project_id !== req.params.id) return res.status(404).json({ error: '质检任务不存在' });
+  res.json({ job });
+}));
+
+app.post('/api/projects/:id/qc/jobs/:jobId/cancel', wrap((req, res) => {
+  res.json({ job: qc.cancelJob(req.params.id, req.params.jobId, String(req.body?.author || '匿名')) });
+}));
+
+// ---- 质检结果：筛选（轨道/严重级别/状态组合）、单条历史、某句完整历史 ----
+app.get('/api/projects/:id/qc/jobs/:jobId/findings', wrap((req, res) => {
+  res.json({
+    findings: qc.listFindings(req.params.id, req.params.jobId, {
+      trackId: req.query.trackId || '',
+      severity: req.query.severity || '',
+      status: req.query.status || '',
+    }),
+  });
+}));
+
+app.get('/api/projects/:id/qc/findings/:findingId', wrap((req, res) => {
+  res.json(qc.findingDetail(req.params.id, req.params.findingId));
+}));
+
+app.get('/api/projects/:id/qc/cues/:cueId/history', wrap((req, res) => {
+  res.json({ history: qc.cueHistory(req.params.id, req.params.cueId) });
+}));
+
+// ---- 处理工作流：批量忽略 / 批量接受建议修复（均要求 baseRevId == HEAD） ----
+app.post('/api/projects/:id/qc/findings/decide', wrap((req, res) => {
+  const { findingIds, action, reason, baseRevId, author } = req.body || {};
+  if (action !== 'ignore') return res.status(400).json({ error: '暂支持 action=ignore' });
+  const result = qc.ignoreFindings(req.params.id, {
+    findingIds, baseRevId, reason: String(reason || ''), author: String(author || '匿名'),
+  });
+  res.json(result);
+}));
+
+app.post('/api/projects/:id/qc/findings/fix', wrap((req, res) => {
+  const { findingIds, baseRevId, reason, author } = req.body || {};
+  const result = qc.applyFixes(req.params.id, {
+    findingIds, baseRevId, reason: String(reason || ''), author: String(author || '匿名'),
+  });
+  res.status(201).json(result);
+}));
+
+// ---- 发布快照：预检、发布（同版本去重）、列表、撤销、逐句对比、文件下载 ----
+app.get('/api/projects/:id/releases/preflight', wrap((req, res) => {
+  res.json(qc.preflight(req.params.id, String(req.query.revisionId || '')));
+}));
+
+app.post('/api/projects/:id/releases', wrap((req, res) => {
+  const { revisionId, confirmations, author, message } = req.body || {};
+  if (!revisionId) return res.status(400).json({ error: '缺少 revisionId' });
+  const result = qc.publish(req.params.id, {
+    revisionId,
+    confirmations: Array.isArray(confirmations) ? confirmations : [],
+    author: String(author || '匿名'),
+    message: String(message || ''),
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+app.get('/api/projects/:id/releases', wrap((req, res) => {
+  res.json({ releases: qc.listReleases(req.params.id) });
+}));
+
+app.get('/api/releases/:rid', wrap((req, res) => {
+  const rel = qc.getRelease(req.params.rid);
+  if (!rel) return res.status(404).json({ error: '发布快照不存在' });
+  res.json({ release: rel });
+}));
+
+app.post('/api/releases/:rid/withdraw', wrap((req, res) => {
+  const rel = qc.getRelease(req.params.rid);
+  if (!rel) return res.status(404).json({ error: '发布快照不存在' });
+  res.json({ release: qc.withdrawRelease(rel.project_id, req.params.rid, {
+    author: String(req.body?.author || '匿名'), reason: String(req.body?.reason || '') }) });
+}));
+
+app.get('/api/releases/:rid/diff', wrap((req, res) => {
+  const rel = qc.getRelease(req.params.rid);
+  if (!rel) return res.status(404).json({ error: '发布快照不存在' });
+  res.json(qc.diffRelease(rel.project_id, req.params.rid, String(req.query.against || '')));
+}));
+
+app.get('/api/releases/:rid/files/:fmt/:trackId', wrap((req, res) => {
+  const rel = qc.getRelease(req.params.rid);
+  if (!rel) return res.status(404).json({ error: '发布快照不存在' });
+  if (rel.status !== 'published') return res.status(410).json({ error: '该发布已撤销，文件不可下载' });
+  const fmt = req.params.fmt === 'vtt' ? 'vtt' : req.params.fmt === 'srt' ? 'srt' : null;
+  if (!fmt) return res.status(400).json({ error: '格式应为 srt 或 vtt' });
+  const trackId = req.params.trackId || 'all';
+  const content = rel.files?.[fmt]?.[trackId];
+  if (content == null) return res.status(404).json({ error: '文件不存在（轨道 id 无效）' });
+  res.setHeader('Content-Type', fmt === 'vtt' ? 'text/vtt; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${rel.label}_${trackId}.${fmt}"`);
+  res.send(content);
 }));
 
 const PORT = Number(process.env.PORT) || 3000;

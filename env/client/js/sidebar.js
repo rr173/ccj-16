@@ -150,7 +150,22 @@ export async function renderHistory() {
   const banner = document.getElementById('viewing-banner');
   banner.style.display = state.viewingRevId ? 'block' : 'none';
   wrap.innerHTML = '加载中…';
-  const { revisions } = await api.listRevisions(state.project.id);
+  const [{ revisions }, { jobs }, { releases }] = await Promise.all([
+    api.listRevisions(state.project.id),
+    api.qcListJobs(state.project.id),
+    api.releaseList(state.project.id),
+  ]);
+  // 版本 → 质检任务 / 发布快照 徽标（质检、修复、发布、撤销都可从版本历史追溯）
+  const qcByRev = new Map();
+  for (const j of jobs) {
+    if (!qcByRev.has(j.revision_id)) qcByRev.set(j.revision_id, []);
+    qcByRev.get(j.revision_id).push(j);
+  }
+  const relByRev = new Map();
+  for (const r of releases) {
+    if (!relByRev.has(r.revision_id)) relByRev.set(r.revision_id, []);
+    relByRev.get(r.revision_id).push(r);
+  }
   wrap.innerHTML = '';
   for (const r of revisions) {
     const div = document.createElement('div');
@@ -158,9 +173,10 @@ export async function renderHistory() {
     if (r.kind === 'merge') div.classList.add('merge');
     if (r.kind === 'import') div.classList.add('import-rev');
     if (r.kind === 'rollback') div.classList.add('rollback-rev');
+    if (r.kind === 'qcfix') div.classList.add('qcfix-rev');
     if (r.id === state.headRevId && !state.viewingRevId) div.classList.add('current');
     if (r.id === state.viewingRevId) div.classList.add('current');
-    const kindLabel = { create: '创建', edit: '编辑', merge: '合并', import: '导入', rollback: '回滚' }[r.kind];
+    const kindLabel = { create: '创建', edit: '编辑', merge: '合并', import: '导入', rollback: '回滚', qcfix: '质检修复' }[r.kind];
     let extra = '';
     if (r.kind === 'import' && r.meta?.kind === 'import') {
       const m = r.meta.imported;
@@ -169,11 +185,21 @@ export async function renderHistory() {
     if (r.kind === 'rollback' && r.meta?.kind === 'rollback') {
       extra = `<br/>回滚 ${r.meta.rolledCueIds.length} 句 · 跳过 ${r.meta.skipped?.length || 0} 句`;
     }
+    if (r.kind === 'qcfix' && r.meta?.kind === 'qcfix') {
+      extra = `<br/>自动修复 ${r.meta.findingIds?.length || 0} 处`;
+    }
+    const qcBadges = (qcByRev.get(r.id) || [])
+      .map((j) => `<span class="tag">🔍质检#${j.id.slice(2, 8)}${j.status === 'done' && j.summary ? ` 阻${j.summary.blocker}/警${j.summary.warning}` : ''}</span>`)
+      .join(' ');
+    const relBadges = (relByRev.get(r.id) || [])
+      .map((x) => `<span class="tag ${x.status === 'published' ? 'qc-ok' : 'qc-bad'}">📦${x.label}${x.status === 'withdrawn' ? '（已撤销）' : ''}</span>`)
+      .join(' ');
     div.innerHTML = `
       <div><b>${escapeHtml(r.message || '（无说明）')}</b></div>
       <div class="meta">
         ${kindLabel} · ${escapeHtml(r.author)} · ${new Date(r.created_at).toLocaleString()}<br/>
         <code>${r.id}</code>${extra}${r.parent2_id ? '<br/>↳ 合并自分支 <code>' + r.parent2_id + '</code>' : ''}
+        ${qcBadges || relBadges ? '<br/>' + qcBadges + ' ' + relBadges : ''}
       </div>
     `;
     div.addEventListener('click', () => window.appHandlers.viewRevision(r.id));
@@ -193,7 +219,12 @@ export async function renderAudit() {
   for (const a of audit) {
     const div = document.createElement('div');
     div.className = 'audit-item';
-    const actionLabel = { add: '新增', edit: '修改', delete: '删除', resolve: '冲突裁决', restore: '恢复', skip: '跳过', rollback: '回滚' }[a.action];
+    const actionLabel = {
+      add: '新增', edit: '修改', delete: '删除', resolve: '冲突裁决', restore: '恢复', skip: '跳过', rollback: '回滚',
+      'qc-rule': '质检规则', 'qc-run': '发起质检', 'qc-done': '质检完成', 'qc-cancel': '取消质检',
+      'qc-ignore': '质检忽略', 'qc-fix': '质检修复', 'qc-stale': '处理过期', 'qc-confirm': '发布确认',
+      publish: '发布快照', withdraw: '撤销发布',
+    }[a.action] || a.action;
     div.innerHTML = `
       <div><span class="field">${escapeHtml(a.field)}</span> · ${actionLabel}</div>
       ${a.old_value != null ? `<div class="vals"><span class="old">- ${escapeHtml(short(a.old_value))}</span></div>` : ''}
