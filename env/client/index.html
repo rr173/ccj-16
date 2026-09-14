@@ -168,6 +168,21 @@
           <div id="gate-exemptions"></div>
         </div>
         <div class="tab-pane" data-pane="release">
+          <div class="pane-section-title">审批策略（多阶段会签）</div>
+          <div id="rel-policy"></div>
+          <div id="rel-policy-editor" style="display:none">
+            <div id="rel-policy-stages"></div>
+            <div class="row" style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+              <button id="rel-policy-add" class="small-btn">+ 添加阶段</button>
+              <button id="rel-policy-save" class="small-btn primary">保存策略</button>
+              <button id="rel-policy-clear" class="small-btn danger">清除策略</button>
+              <button id="rel-policy-cancel" class="small-btn">取消</button>
+            </div>
+            <p style="color:var(--muted);font-size:11px;margin:6px 0 0">
+              阶段按顺序会签：未完成当前阶段不能进入下一阶段。提交申请时冻结当时策略；
+              此后修改/清除策略会使进行中的申请立即失效。
+            </p>
+          </div>
           <div class="pane-section-title">从版本创建发布快照（预检 → 申请 → 审批 → 发布）</div>
           <div class="new-row">
             <select id="rel-rev-select" style="flex:1"></select>

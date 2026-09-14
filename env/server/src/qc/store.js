@@ -16,6 +16,11 @@
  *   才能发布快照。重复提交命中进行中申请即幂等返回；版本产生新提交、阻断问题重新
  *   出现或警告确认项变化时，待处理/已批准申请自动失效（提交钩子 + 读取时复检），
  *   需重新申请。审核与申请状态流转全部写审计，所有条件更新在事务内完成以保证并发一致。
+ * - 多阶段会签（qc/approval.js）：项目可配置有顺序的审批阶段（角色/最少同意人数/
+ *   驳回后是否允许重新提交/审批有效期）；提交申请时冻结策略、门禁事件、版本与预检
+ *   指纹，按阶段推进会签，全部阶段通过才批准；审批过程中版本/预检/门禁事件/策略
+ *   任一变化申请立即失效；阶段超时标记过期，负责人在门禁仍满足时可重新开启；
+ *   驳回后重新提交生成新申请版本并保留与前一申请的关联。
  */
 const crypto = require('crypto');
 const { db } = require('../db');
@@ -24,6 +29,7 @@ const { normalizeSnapshot, validate } = require('../validation');
 const rules = require('./rules');
 const exporter = require('./exporter');
 const differ = require('./diff');
+const approval = require('./approval');
 // 发布回归门禁：延迟访问以规避循环依赖（gate/store 内部再按需 require 本模块）
 const gate = () => require('../gate/store');
 
@@ -394,21 +400,24 @@ store.onCommit(({ projectId, revision, author }) => {
   store.writeAudit(projectId, revision.id, auditEntries, author);
 });
 
-/* --------- 提交钩子：项目产生新提交后，待处理/已批准的发布申请统一失效 --------- */
+/* --------- 提交钩子：项目产生新提交后，待处理/已批准/已过期的发布申请统一失效 --------- */
 store.onCommit(({ projectId, revision, author }) => {
   const active = db
-    .prepare(`SELECT id, revision_id, status FROM release_requests WHERE project_id=? AND status IN ('pending','approved')`)
+    .prepare(`SELECT id, revision_id, status FROM release_requests WHERE project_id=? AND status IN ('pending','approved','expired')`)
     .all(projectId);
   if (!active.length) return;
   const t = now();
   const auditEntries = [];
   for (const rq of active) {
     db.prepare(
-      `UPDATE release_requests SET status='invalidated', invalid_reason='new-revision', invalidated_at=? WHERE id=? AND status IN ('pending','approved')`,
+      `UPDATE release_requests SET status='invalidated', invalid_reason='new-revision', invalidated_at=? WHERE id=? AND status IN ('pending','approved','expired')`,
     ).run(t, rq.id);
     auditEntries.push({
       field: `relreq:${rq.id}`, action: 'relreq-invalidate', oldValue: rq.status,
       newValue: `invalidated:new-revision（项目 HEAD 推进到 ${revision.id}）`,
+    });
+    approval.addEvent(projectId, rq.id, null, 'invalidate', author || '系统', {
+      reason: 'new-revision', text: `项目 HEAD 推进到 ${revision.id}`,
     });
   }
   store.writeAudit(projectId, revision.id, auditEntries, author || '系统');
@@ -496,6 +505,8 @@ function preflight(projectId, revisionId) {
 /* ================================ 发布申请与审批 ================================ */
 
 const ACTIVE_REQ = `status IN ('pending','approved')`;
+// 读取时复检覆盖已过期申请：冻结指纹一旦变化，过期申请同样转为失效（不可再重开）
+const REVALID_REQ = `status IN ('pending','approved','expired')`;
 
 function parseRequest(row) {
   if (!row) return null;
@@ -503,6 +514,8 @@ function parseRequest(row) {
     ...row,
     preflight: JSON.parse(row.preflight),
     confirmations: JSON.parse(row.confirmations || '[]'),
+    policy_snapshot: row.policy_snapshot ? JSON.parse(row.policy_snapshot) : null,
+    gate_snapshot: row.gate_snapshot ? JSON.parse(row.gate_snapshot) : null,
   };
 }
 function getRequest(requestId) {
@@ -523,6 +536,8 @@ function listRequests(projectId) {
         blockerCount: preflight.blockerUnhandled.length,
         warningCount: preflight.warningsPending.length,
         hasHardErrors: preflight.hardErrors.length > 0,
+        // 会签进度：阶段实例 + 各阶段已落署名意见（待审核人=当前阶段角色）
+        stages: full.policy_snapshot ? approval.stagesWithDecisions(full.id) : null,
       };
     });
 }
@@ -533,24 +548,30 @@ const INVALID_REASON_TEXT = {
   'warnings-changed': '警告确认项发生变化',
   'hard-error': '时间轴硬约束不再通过',
   'qc-changed': '质检结果发生变化',
+  'policy-changed': '审批策略发生变化',
+  'gate-changed': '门禁评估事件发生变化',
 };
 
 /**
- * 读取时复检：把预检指纹与当前不一致的待处理/已批准申请置为失效。
- * 与提交钩子互补——质检结果/处理决定/警告确认发生变化但未产生新版本时，
- * 由此路径懒失效，保证页面与审核接口看到的状态始终一致。
+ * 读取时复检：把冻结指纹与当前不一致的待处理/已批准/已过期申请置为失效。
+ * 与提交钩子互补——质检结果/处理决定/警告确认/审批策略/门禁事件发生变化
+ * 但未产生新版本时，由此路径懒失效，保证页面与审核接口看到的状态始终一致。
+ * 指纹全部一致的待处理申请再做阶段超时扫描（过期可重开，与失效不同）。
  */
 function revalidateRequests(projectId, revisionId = null) {
   let rows = db
-    .prepare(`SELECT * FROM release_requests WHERE project_id=? AND ${ACTIVE_REQ}`)
+    .prepare(`SELECT * FROM release_requests WHERE project_id=? AND ${REVALID_REQ}`)
     .all(projectId);
   if (revisionId) rows = rows.filter((r) => r.revision_id === revisionId);
   if (!rows.length) return;
   const t = now();
   const auditEntries = [];
+  const invalidatedEvents = [];
   const invalidate = db.prepare(
-    `UPDATE release_requests SET status='invalidated', invalid_reason=?, invalidated_at=? WHERE id=? AND ${ACTIVE_REQ}`,
+    `UPDATE release_requests SET status='invalidated', invalid_reason=?, invalidated_at=? WHERE id=? AND ${REVALID_REQ}`,
   );
+  const policy = approval.getPolicy(projectId);
+  const policyHash = policy ? policy.hash : null;
   const txn = db.transaction(() => {
     for (const row of rows) {
       const bound = JSON.parse(row.preflight);
@@ -560,26 +581,52 @@ function revalidateRequests(projectId, revisionId = null) {
       } catch {
         continue; // 版本/项目异常：交给调用方报错
       }
-      if (current.fingerprint === row.fingerprint) continue;
-      const reason = current.headRevId !== row.head_rev_id
-        ? 'new-revision'
-        : JSON.stringify(current.blockerUnhandled.map((f) => f.id).sort()) !==
-            JSON.stringify(bound.blockerUnhandled.map((f) => f.id).sort())
-          ? 'blockers-changed'
-          : JSON.stringify(current.warningsPending.map((f) => f.id).sort()) !==
-              JSON.stringify(bound.warningsPending.map((f) => f.id).sort())
-            ? 'warnings-changed'
-            : 'qc-changed';
-      const res = invalidate.run(reason, t, row.id);
-      if (res.changes) {
-        auditEntries.push({
-          field: `relreq:${row.id}`, action: 'relreq-invalidate', oldValue: row.status,
-          newValue: `invalidated:${reason}（${INVALID_REASON_TEXT[reason] || reason}）`,
-        });
+      let reason = null;
+      if (current.fingerprint !== row.fingerprint) {
+        reason = current.headRevId !== row.head_rev_id
+          ? 'new-revision'
+          : JSON.stringify(current.blockerUnhandled.map((f) => f.id).sort()) !==
+              JSON.stringify(bound.blockerUnhandled.map((f) => f.id).sort())
+            ? 'blockers-changed'
+            : JSON.stringify(current.warningsPending.map((f) => f.id).sort()) !==
+                JSON.stringify(bound.warningsPending.map((f) => f.id).sort())
+              ? 'warnings-changed'
+              : 'qc-changed';
+      } else if ((row.policy_hash || null) !== policyHash) {
+        reason = 'policy-changed'; // 审批策略被修改/清除
+      } else if (row.gate_fingerprint) {
+        const gs = approval.gateSnapshot(projectId, row.revision_id);
+        if (gs.fingerprint !== row.gate_fingerprint) reason = 'gate-changed'; // 门禁事件/豁免变化
+      }
+      if (reason) {
+        const res = invalidate.run(reason, t, row.id);
+        if (res.changes) {
+          auditEntries.push({
+            field: `relreq:${row.id}`, action: 'relreq-invalidate', oldValue: row.status,
+            newValue: `invalidated:${reason}（${INVALID_REASON_TEXT[reason] || reason}）`,
+          });
+          invalidatedEvents.push({ id: row.id, reason });
+        }
+        continue;
+      }
+      // 指纹一致：待处理申请做阶段超时扫描（过期 ≠ 失效，负责人在门禁仍满足时可重开）
+      if (row.status === 'pending') {
+        const expired = approval.sweepExpiry(row, t);
+        if (expired) {
+          auditEntries.push({
+            field: `relreq:${row.id}`, action: 'relreq-expire', oldValue: 'pending',
+            newValue: `expired:${expired.reason}`,
+          });
+        }
       }
     }
   });
   txn();
+  for (const e of invalidatedEvents) {
+    approval.addEvent(projectId, e.id, null, 'invalidate', '系统', {
+      reason: e.reason, text: INVALID_REASON_TEXT[e.reason] || e.reason,
+    });
+  }
   if (auditEntries.length) {
     const headId = store.getProject(projectId).head_id;
     store.writeAudit(projectId, headId, auditEntries, '系统');
@@ -588,6 +635,9 @@ function revalidateRequests(projectId, revisionId = null) {
 
 /**
  * 创建发布申请。预检必须通过；警告项须随申请逐项确认（与申请一起冻结）。
+ * 提交时冻结当时的审批策略、门禁事件状态、来源版本与预检指纹；配置了策略时
+ * 按阶段生成会签实例。驳回后的重新提交生成新的申请版本号并关联前一申请
+ * （被驳回阶段策略不允许重新提交时拒绝）。
  * 幂等：同版本已有待处理/已批准申请时直接返回已有申请（deduplicated=true），
  *       不产生重复记录；待处理/已批准申请若复检发现已失效则先失效再新建。
  */
@@ -642,6 +692,33 @@ function createRequest(projectId, { revisionId, confirmations = [], message = ''
     .get(projectId, revisionId);
   if (existing) return { request: parseRequest(existing), deduplicated: true };
 
+  // 驳回后的重新提交：生成新的申请版本号，并保留与前一申请的关联关系；
+  // 若被驳回阶段的冻结策略不允许重新提交，则拒绝
+  const prevRejected = db
+    .prepare(`SELECT * FROM release_requests WHERE project_id=? AND revision_id=? AND status='rejected'
+              ORDER BY created_at DESC, id DESC LIMIT 1`)
+    .get(projectId, revisionId);
+  let versionNo = 1;
+  let prevId = null;
+  let rootId = null;
+  if (prevRejected) {
+    if (prevRejected.policy_snapshot) {
+      const rejStage = db
+        .prepare(`SELECT * FROM relreq_stages WHERE request_id=? AND status='rejected' ORDER BY stage_index LIMIT 1`)
+        .get(prevRejected.id);
+      if (rejStage && !rejStage.allow_resubmit) {
+        throw httpError(400, '上一申请已被驳回，且被驳回阶段的审批策略不允许重新提交');
+      }
+    }
+    versionNo = (prevRejected.version_no || 1) + 1;
+    prevId = prevRejected.id;
+    rootId = prevRejected.root_request_id || prevRejected.id;
+  }
+
+  // 冻结当时的审批策略与门禁事件状态（连同版本、预检指纹一起绑定到申请）
+  const policy = approval.getPolicy(projectId);
+  const gsnap = approval.gateSnapshot(projectId, revisionId);
+
   const id = rqid();
   const t = now();
   const payload = {
@@ -649,39 +726,70 @@ function createRequest(projectId, { revisionId, confirmations = [], message = ''
     preflight: JSON.stringify(pre), fingerprint: pre.fingerprint,
     confirmations: JSON.stringify(need),
     message: String(message || ''), applicant: author, created_at: t,
+    policy_snapshot: policy ? JSON.stringify(policy.stages) : null,
+    policy_hash: policy ? policy.hash : null,
+    gate_snapshot: JSON.stringify(gsnap.items),
+    gate_fingerprint: gsnap.fingerprint,
+    version_no: versionNo, prev_request_id: prevId, root_request_id: rootId,
   };
   db.prepare(
     `INSERT INTO release_requests
        (id, project_id, revision_id, head_rev_id, status, preflight, fingerprint, confirmations,
-        message, applicant, reviewer, review_comment, invalid_reason, created_at, reviewed_at, invalidated_at, published_at, release_id)
+        message, applicant, reviewer, review_comment, invalid_reason, created_at, reviewed_at, invalidated_at, published_at, release_id,
+        policy_snapshot, policy_hash, current_stage, gate_snapshot, gate_fingerprint, version_no, prev_request_id, root_request_id)
      VALUES (@id, @project_id, @revision_id, @head_rev_id, 'pending', @preflight, @fingerprint, @confirmations,
-        @message, @applicant, NULL, NULL, NULL, @created_at, NULL, NULL, NULL, NULL)`,
+        @message, @applicant, NULL, NULL, NULL, @created_at, NULL, NULL, NULL, NULL,
+        @policy_snapshot, @policy_hash, 0, @gate_snapshot, @gate_fingerprint, @version_no, @prev_request_id, @root_request_id)`,
   ).run(payload);
+  // 配置了审批策略：按冻结策略生成阶段实例并激活第一阶段
+  if (policy) approval.createStages(projectId, id, policy.stages, author, t);
+  approval.addEvent(projectId, id, null, 'submit', author, {
+    revisionId, headRevId: pre.headRevId, fingerprint: pre.fingerprint,
+    policyHash: policy ? policy.hash : null, gateFingerprint: gsnap.fingerprint,
+    versionNo, prevRequestId: prevId, message: String(message || ''),
+  });
+  if (prevId) {
+    approval.addEvent(projectId, id, null, 'resubmit', author, { prevRequestId: prevId, versionNo });
+  }
   store.writeAudit(projectId, revisionId, [
     {
       field: `relreq:${id}`, action: 'relreq-submit', oldValue: null,
       newValue: JSON.stringify({
         revisionId, headRevId: pre.headRevId, fingerprint: pre.fingerprint,
         jobId: pre.job.id, warningsConfirmed: need.length, message: String(message || ''),
+        versionNo, prevRequestId: prevId,
+        policyStages: policy ? policy.stages.map((s) => s.role) : null,
+        gateFingerprint: gsnap.fingerprint,
       }),
     },
   ], author);
   return { request: getRequest(id), deduplicated: false };
 }
 
-/** 统一的审核入口：条件更新保证并发下同一申请不会被重复批准/驳回或批准后再驳回。 */
+/**
+ * 统一的审核入口。
+ * - 未配置审批策略的申请：单步批准/驳回，条件更新保证并发下同一申请不会被
+ *   重复批准/驳回或批准后再驳回；
+ * - 配置了审批策略的申请：对当前阶段会签（见 qc/approval.js），同一审核人
+ *   同一阶段重复操作幂等，并发会签只有一个合法状态转换，全部阶段通过后
+ *   申请才转为 approved。
+ */
 function decideRequest(projectId, requestId, { action, comment = '', author }) {
   if (!['approve', 'reject'].includes(action)) throw httpError(400, 'action 应为 approve 或 reject');
   const row = db.prepare('SELECT * FROM release_requests WHERE id = ?').get(requestId);
   if (!row || row.project_id !== projectId) throw httpError(404, '发布申请不存在');
 
-  // 审核前复检：绑定的版本/预检结果已变化则申请失效，审核动作拒绝执行
+  // 审核前复检：绑定的版本/预检结果/策略/门禁事件已变化则申请失效，审核动作拒绝执行；
+  // 阶段超时在此扫描标记
   revalidateRequests(projectId, row.revision_id);
   const cur = getRequest(requestId);
   if (cur.status === 'invalidated') {
     throw httpError(409, `申请已失效（${INVALID_REASON_TEXT[cur.invalid_reason] || cur.invalid_reason}），请重新申请`, {
       invalidated: true, reason: cur.invalid_reason,
     });
+  }
+  if (cur.status === 'expired') {
+    throw httpError(409, '当前审批阶段已超时过期，需负责人在门禁仍满足时重新开启阶段后才能继续会签', { expired: true });
   }
   if (action === 'reject' && !String(comment || '').trim()) {
     throw httpError(400, '驳回必须填写审核意见');
@@ -692,6 +800,12 @@ function decideRequest(projectId, requestId, { action, comment = '', author }) {
       : cur.status === 'rejected'
         ? '申请已驳回，不能重复审核'
         : '申请已发布，不能再审核');
+  }
+
+  // 多阶段会签：对当前阶段投同意/驳回（幂等 + 事务内条件迁移）
+  if (cur.policy_snapshot) {
+    const r = approval.decideStaged(projectId, cur, { action, comment: String(comment || ''), author });
+    return { request: getRequest(requestId), deduplicated: !!r.deduplicated, outcome: r.outcome, approvals: r.approvals };
   }
 
   const next = action === 'approve' ? 'approved' : 'rejected';
@@ -707,6 +821,10 @@ function decideRequest(projectId, requestId, { action, comment = '', author }) {
       status: winner.status, reviewer: winner.reviewer,
     });
   }
+  approval.addEvent(projectId, requestId, null, 'decision', author, { action, comment: String(comment || '') });
+  approval.addEvent(projectId, requestId, null, action === 'approve' ? 'request-approved' : 'request-rejected', author, {
+    comment: String(comment || ''),
+  });
   store.writeAudit(projectId, row.revision_id, [
     {
       field: `relreq:${requestId}`,
@@ -802,6 +920,20 @@ function publish(projectId, { requestId, author }) {
     publishedBy: author,
     approvedBy: fresh.reviewer,
   };
+  // 多阶段会签：把各阶段意见/署名/时间随快照冻结（全部阶段通过才能走到这里）
+  if (fresh.policy_snapshot) {
+    qcSummary.approval = {
+      policyHash: fresh.policy_hash,
+      versionNo: fresh.version_no,
+      stages: approval.stagesWithDecisions(requestId).map((s) => ({
+        stage: s.stage_index + 1,
+        role: s.role,
+        minApprovals: s.min_approvals,
+        status: s.status,
+        decisions: s.decisions,
+      })),
+    };
+  }
   const files = exporter.renderFiles(rev.snapshot);
   const seq = db.prepare('SELECT COUNT(*) AS c FROM releases WHERE project_id = ?').get(projectId).c + 1;
   const label = `REL-${String(seq).padStart(3, '0')}`;
@@ -861,6 +993,7 @@ function publish(projectId, { requestId, author }) {
     newValue: JSON.stringify({ label, revisionId, requestId, jobId: pre.job.id, warningsConfirmed: warningNeed.length }),
   });
   store.writeAudit(projectId, revisionId, auditEntries, author);
+  approval.addEvent(projectId, requestId, null, 'publish', author, { release: id, label });
   return { release: getRelease(id), deduplicated: false, requestId };
 }
 
@@ -903,6 +1036,7 @@ module.exports = {
   decideRequest,
   listRequests,
   getRequest,
+  revalidateRequests,
   publish,
   withdrawRelease,
   listReleases,

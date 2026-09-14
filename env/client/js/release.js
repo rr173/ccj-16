@@ -1,11 +1,16 @@
 // 发布标签页：预检 → 提交发布申请（绑定版本+预检结果）→ 审核（批准/驳回）→ 批准后生成发布快照
-// 申请重复提交幂等；版本产生新提交、阻断问题重新出现或警告确认变化时，服务端自动失效并提示重新申请。
+// 多阶段会签：项目负责人可配置有顺序的审批阶段（角色/最少同意人数/驳回重提/有效期）；
+// 申请冻结当时策略与门禁事件，逐阶段会签，全部阶段通过才批准；阶段超时可由负责人重开；
+// 版本/预检/门禁事件/策略变化申请自动失效；驳回后重新提交生成新申请版本并保留关联。
 import { api } from './api.js';
 import { state } from './state.js';
 import { msToSrt } from './time.js';
 
 let ctx = null;
-const rel = { preflight: null, checked: new Set(), releases: [], requests: [], revisions: [], gateStatus: null };
+const rel = {
+  preflight: null, checked: new Set(), releases: [], requests: [], revisions: [],
+  gateStatus: null, policy: null, policyDraft: null, detailFor: null,
+};
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -16,6 +21,7 @@ const REQ_STATUS = {
   approved: { label: '已批准', cls: 'qc-ok' },
   rejected: { label: '已驳回', cls: 'qc-bad' },
   invalidated: { label: '已失效', cls: 'qc-bad' },
+  expired: { label: '已过期', cls: 'qc-warn' },
   published: { label: '已发布', cls: 'qc-ok' },
 };
 const INVALID_TEXT = {
@@ -24,6 +30,21 @@ const INVALID_TEXT = {
   'warnings-changed': '警告确认项发生变化',
   'hard-error': '时间轴硬约束不再通过',
   'qc-changed': '质检结果发生变化（任务/处理状态与申请时不一致）',
+  'policy-changed': '审批策略发生变化',
+  'gate-changed': '门禁评估事件发生变化',
+};
+const STAGE_STATUS = {
+  waiting: { label: '等待', cls: '' },
+  active: { label: '会签中', cls: 'active' },
+  approved: { label: '已通过', cls: 'approved' },
+  rejected: { label: '已驳回', cls: 'rejected' },
+  expired: { label: '已过期', cls: 'expired' },
+};
+const ttlText = (ms) => {
+  if (!ms) return '不限期';
+  if (ms % 86400000 === 0) return `${ms / 86400000} 天`;
+  if (ms % 3600000 === 0) return `${ms / 3600000} 小时`;
+  return `${Math.round(ms / 60000)} 分钟`;
 };
 
 export function initRelease(context) {
@@ -37,18 +58,31 @@ export function initRelease(context) {
   });
   $('#rel-check-btn').addEventListener('click', runPreflight);
   $('#rel-apply-btn').addEventListener('click', onMainButton);
+  $('#rel-policy-add').addEventListener('click', () => {
+    rel.policyDraft.push({ role: '', minApprovals: 1, allowResubmit: true, ttlHours: 0 });
+    renderPolicyEditor();
+  });
+  $('#rel-policy-save').addEventListener('click', savePolicy);
+  $('#rel-policy-clear').addEventListener('click', clearPolicy);
+  $('#rel-policy-cancel').addEventListener('click', () => {
+    rel.policyDraft = null;
+    $('#rel-policy-editor').style.display = 'none';
+    renderPolicy();
+  });
 }
 
 export async function refreshReleaseTab() {
   if (!state.project) return;
-  const [{ revisions }, { releases }, { requests }] = await Promise.all([
+  const [{ revisions }, { releases }, { requests }, { policy }] = await Promise.all([
     api.listRevisions(state.project.id),
     api.releaseList(state.project.id),
-    api.releaseRequestList(state.project.id), // 服务端读取时复检并自动失效
+    api.releaseRequestList(state.project.id), // 服务端读取时复检并自动失效/过期扫描
+    api.approvalPolicyGet(state.project.id),
   ]);
   rel.revisions = revisions;
   rel.releases = releases;
   rel.requests = requests;
+  rel.policy = policy;
   const sel = $('#rel-rev-select');
   const keep = sel.value;
   sel.innerHTML = revisions.map((r) =>
@@ -57,9 +91,115 @@ export async function refreshReleaseTab() {
   rel.preflight = null;
   $('#rel-preflight').innerHTML = '<p style="color:var(--muted)">选择版本后点击「预检」。</p>';
   $('#rel-message').value = '';
+  renderPolicy();
   renderRequests();
   renderReleases();
   updateApplyButton();
+}
+
+/* ==================== 审批策略配置 ==================== */
+
+function renderPolicy() {
+  const wrap = $('#rel-policy');
+  const p = rel.policy;
+  if (!p) {
+    wrap.innerHTML = `<div class="rel-policy-summary">未配置审批策略：发布申请为<b>单步审批</b>（一名审核人批准即通过）。
+      <button class="small-btn" id="rel-policy-edit">配置多阶段会签…</button></div>`;
+  } else {
+    const stages = p.stages.map((s, i) =>
+      `${i + 1}．<b>${esc(s.role)}</b>（≥${s.minApprovals} 人同意 · ${ttlText(s.ttlMs)}${s.allowResubmit ? '' : ' · 驳回后不可重提'}）`,
+    ).join(' → ');
+    wrap.innerHTML = `<div class="rel-policy-summary">当前策略：${stages}
+      <div class="meta">${esc(p.updatedBy)} 更新于 ${dt(p.updatedAt)} · 提交申请时冻结；此后修改策略会使进行中的申请失效
+      <button class="small-btn" id="rel-policy-edit">修改策略…</button></div></div>`;
+  }
+  wrap.querySelector('#rel-policy-edit').addEventListener('click', openPolicyEditor);
+}
+
+function openPolicyEditor() {
+  rel.policyDraft = (rel.policy?.stages || []).map((s) => ({
+    role: s.role, minApprovals: s.minApprovals, allowResubmit: s.allowResubmit, ttlHours: s.ttlMs / 3600000,
+  }));
+  if (!rel.policyDraft.length) {
+    rel.policyDraft.push({ role: '', minApprovals: 1, allowResubmit: true, ttlHours: 0 });
+  }
+  $('#rel-policy-editor').style.display = 'block';
+  renderPolicyEditor();
+}
+
+function renderPolicyEditor() {
+  const wrap = $('#rel-policy-stages');
+  wrap.innerHTML = rel.policyDraft.map((s, i) => `
+    <div class="stage-row" data-i="${i}">
+      <span class="stage-no">阶段 ${i + 1}</span>
+      <input type="text" data-k="role" placeholder="审核角色（如 终审）" value="${esc(s.role)}" />
+      <label>最少同意 <input type="number" data-k="minApprovals" min="1" max="99" value="${s.minApprovals}" /> 人</label>
+      <label>有效期 <input type="number" data-k="ttlHours" min="0" max="2160" step="0.5" value="${s.ttlHours}" />小时(0=不限)</label>
+      <label><input type="checkbox" data-k="allowResubmit" ${s.allowResubmit ? 'checked' : ''} /> 允许驳回后重新提交</label>
+      <button class="small-btn danger" data-del="${i}">删除</button>
+    </div>`).join('') || '<p style="color:var(--muted);font-size:12px">尚无阶段，点击「+ 添加阶段」。</p>';
+  wrap.querySelectorAll('input').forEach((inp) => {
+    inp.addEventListener('change', () => {
+      const row = inp.closest('.stage-row');
+      const s = rel.policyDraft[Number(row.dataset.i)];
+      const k = inp.dataset.k;
+      if (k === 'allowResubmit') s.allowResubmit = inp.checked;
+      else if (k === 'minApprovals') s.minApprovals = Math.max(1, Math.min(99, Math.round(Number(inp.value) || 1)));
+      else if (k === 'ttlHours') s.ttlHours = Math.max(0, Number(inp.value) || 0);
+      else s.role = inp.value;
+    });
+  });
+  wrap.querySelectorAll('[data-del]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      rel.policyDraft.splice(Number(btn.dataset.del), 1);
+      renderPolicyEditor();
+    });
+  });
+}
+
+async function savePolicy() {
+  // 先收集未失焦的输入
+  document.querySelectorAll('#rel-policy-stages .stage-row').forEach((row) => {
+    const s = rel.policyDraft[Number(row.dataset.i)];
+    s.role = row.querySelector('[data-k=role]').value;
+    s.minApprovals = Math.max(1, Math.min(99, Math.round(Number(row.querySelector('[data-k=minApprovals]').value) || 1)));
+    s.ttlHours = Math.max(0, Number(row.querySelector('[data-k=ttlHours]').value) || 0);
+    s.allowResubmit = row.querySelector('[data-k=allowResubmit]').checked;
+  });
+  const stages = rel.policyDraft.map((s) => ({
+    role: s.role.trim(), minApprovals: s.minApprovals, allowResubmit: s.allowResubmit,
+    ttlMs: Math.round(s.ttlHours * 3600000),
+  }));
+  if (!stages.length) return ctx.toast('至少保留一个阶段；如需单步审批请用「清除策略」', 'error');
+  if (stages.some((s) => !s.role)) return ctx.toast('每个阶段都要填写审核角色', 'error');
+  try {
+    const { policy } = await api.approvalPolicyPut(state.project.id, { stages, author: ctx.getAuthor() });
+    rel.policy = policy;
+    rel.policyDraft = null;
+    $('#rel-policy-editor').style.display = 'none';
+    ctx.toast('审批策略已保存；进行中的申请若冻结策略不一致已自动失效', 'ok');
+    ctx.refreshAudit?.();
+    await refreshRequestsOnly();
+    renderPolicy();
+  } catch (e) {
+    ctx.toast('保存策略失败：' + e.message, 'error');
+  }
+}
+
+async function clearPolicy() {
+  if (!confirm('清除审批策略后恢复单步审批；进行中的申请会因策略变化立即失效。确定清除？')) return;
+  try {
+    const { policy } = await api.approvalPolicyPut(state.project.id, { stages: [], author: ctx.getAuthor() });
+    rel.policy = policy;
+    rel.policyDraft = null;
+    $('#rel-policy-editor').style.display = 'none';
+    ctx.toast('审批策略已清除，恢复单步审批', 'ok');
+    ctx.refreshAudit?.();
+    await refreshRequestsOnly();
+    renderPolicy();
+  } catch (e) {
+    ctx.toast('清除失败：' + e.message, 'error');
+  }
 }
 
 function activeRequestFor(revisionId) {
@@ -262,21 +402,36 @@ async function doApply() {
 }
 
 async function doApprove(req) {
-  const comment = prompt(`批准发布申请 ${req.id.slice(3, 11)} 的审核意见（可留空）：`, '') ?? '';
+  const stage = currentStage(req);
+  const comment = prompt(`批准发布申请 ${req.id.slice(3, 11)}${stage ? `（当前阶段：${stage.role}）` : ''} 的审核意见（可留空）：`, '') ?? '';
   try {
-    await api.releaseApprove(req.id, { author: ctx.getAuthor(), comment });
-    ctx.toast('申请已批准，可生成发布快照', 'ok');
+    const r = await api.releaseApprove(req.id, { author: ctx.getAuthor(), comment });
+    if (r.deduplicated) {
+      ctx.toast('你在本阶段已提交过相同意见（幂等，未重复记录）', '');
+    } else if (r.outcome === 'collecting') {
+      const s = currentStage(r.request);
+      ctx.toast(`已同意（会签 ${r.approvals}/${s ? s.min_approvals : '?'}），等待其他审核人`, 'ok');
+    } else if (r.outcome === 'stage-approved') {
+      ctx.toast('当前阶段会签通过，已进入下一阶段', 'ok');
+    } else {
+      ctx.toast('申请已批准，可生成发布快照', 'ok');
+    }
     ctx.refreshAudit?.();
     await refreshRequestsOnly();
     if (rel.preflight) renderPreflight();
   } catch (e) {
     await refreshRequestsOnly();
-    ctx.toast('批准失败：' + e.message, 'error');
+    if (e.data?.expired) {
+      ctx.toast('阶段已超时过期：需负责人重新开启后才能继续会签', 'error');
+    } else {
+      ctx.toast('批准失败：' + e.message, 'error');
+    }
   }
 }
 
 async function doReject(req) {
-  const comment = prompt(`驳回发布申请 ${req.id.slice(3, 11)} 的审核意见（必填，写入审计）：`, '');
+  const stage = currentStage(req);
+  const comment = prompt(`驳回发布申请 ${req.id.slice(3, 11)}${stage ? `（当前阶段：${stage.role}）` : ''} 的审核意见（必填，写入审计）：`, '');
   if (comment == null) return;
   if (!comment.trim()) { ctx.toast('驳回必须填写审核意见', 'error'); return; }
   try {
@@ -287,7 +442,23 @@ async function doReject(req) {
     if (rel.preflight) renderPreflight();
   } catch (e) {
     await refreshRequestsOnly();
-    ctx.toast('驳回失败：' + e.message, 'error');
+    if (e.data?.expired) {
+      ctx.toast('阶段已超时过期：需负责人重新开启后才能继续会签', 'error');
+    } else {
+      ctx.toast('驳回失败：' + e.message, 'error');
+    }
+  }
+}
+
+async function doReopen(req) {
+  try {
+    await api.releaseReopen(req.id, { author: ctx.getAuthor() });
+    ctx.toast('已重新开启当前阶段（获得新的有效期窗口）', 'ok');
+    ctx.refreshAudit?.();
+    await refreshRequestsOnly();
+  } catch (e) {
+    await refreshRequestsOnly();
+    ctx.toast('重新开启失败：' + e.message, 'error');
   }
 }
 

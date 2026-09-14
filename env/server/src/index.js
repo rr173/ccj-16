@@ -3,6 +3,7 @@ const path = require('path');
 const express = require('express');
 const store = require('./store');
 const qc = require('./qc/store');
+const approval = require('./qc/approval');
 const diffreport = require('./report/store');
 const gate = require('./gate/store');
 const { validate } = require('./validation');
@@ -213,6 +214,35 @@ app.post('/api/projects/:id/qc/findings/fix', wrap((req, res) => {
 // ---- 发布审批：预检 → 发布申请 → 批准/驳回 →（批准且未失效）发布 ----
 app.get('/api/projects/:id/releases/preflight', wrap((req, res) => {
   res.json(qc.preflight(req.params.id, String(req.query.revisionId || '')));
+}));
+
+// ---- 多阶段会签：审批策略配置（有顺序的阶段：角色/最少同意人数/驳回重提/有效期） ----
+app.get('/api/projects/:id/approval-policy', wrap((req, res) => {
+  res.json(approval.getPolicyPayload(req.params.id));
+}));
+
+app.put('/api/projects/:id/approval-policy', wrap((req, res) => {
+  const { stages, author } = req.body || {};
+  try {
+    res.json(approval.putPolicy(req.params.id, { stages, author: String(author || '匿名') }));
+  } catch (e) {
+    if (!e.status) e.status = 400; // 策略参数校验错误
+    throw e;
+  }
+}));
+
+// 申请详情：阶段/会签意见/完整事件流/重新提交链
+app.get('/api/release-requests/:rid', wrap((req, res) => {
+  const rq = qc.getRequest(req.params.rid);
+  if (!rq) return res.status(404).json({ error: '发布申请不存在' });
+  res.json(approval.getRequestDetail(rq.project_id, req.params.rid));
+}));
+
+// 阶段超时过期后，负责人在门禁仍满足时重新开启当前阶段
+app.post('/api/release-requests/:rid/reopen', wrap((req, res) => {
+  const rq = qc.getRequest(req.params.rid);
+  if (!rq) return res.status(404).json({ error: '发布申请不存在' });
+  res.json(approval.reopenStage(rq.project_id, req.params.rid, String(req.body?.author || '匿名')));
 }));
 
 // 创建发布申请（同版本有待处理/已批准申请时幂等返回）

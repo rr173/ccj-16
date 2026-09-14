@@ -153,9 +153,10 @@ CREATE TABLE IF NOT EXISTS releases (
   withdraw_reason TEXT
 );
 -- 发布申请：预检通过后生成，绑定来源版本与当时的预检结果（preflight 快照 + 指纹）；
--- 审核人可批准/驳回，只有批准且绑定内容仍与当前一致时才能发布。
--- 状态机：pending（待处理）→ approved（已批准）/ rejected（已驳回）/ invalidated（已失效）；
---        approved → published（已发布）/ invalidated。
+-- 配置审批策略后按冻结的策略分阶段会签，全部阶段通过才转为 approved。
+-- 状态机：pending（待处理/会签中）→ approved（已批准）/ rejected（已驳回）/
+--        expired（阶段超时，负责人在门禁仍满足时可重新开启）/ invalidated（已失效）；
+--        approved → published（已发布）/ invalidated。expired → pending（重新开启）/ invalidated。
 CREATE TABLE IF NOT EXISTS release_requests (
   id               TEXT PRIMARY KEY,
   project_id       TEXT NOT NULL,
@@ -186,6 +187,71 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_relreq_active
 -- 同一版本只允许存在一个有效发布：重复发布命中该索引时返回已有快照，不产生重复
 CREATE UNIQUE INDEX IF NOT EXISTS uq_release_published
   ON releases(project_id, revision_id) WHERE status = 'published';
+
+-- ============ 多阶段会签与审批策略 ============
+
+-- 审批策略（每项目一份）：有顺序的审批阶段；每阶段指定审核角色、最少同意人数、
+-- 是否允许驳回后重新提交与审批有效期（毫秒，0=不限）。提交发布申请时随申请冻结，
+-- 此后策略变更会把进行中的申请标记为失效（policy-changed）。
+CREATE TABLE IF NOT EXISTS approval_policies (
+  project_id  TEXT PRIMARY KEY,
+  stages      TEXT NOT NULL,             -- JSON [{role,minApprovals,allowResubmit,ttlMs}]
+  policy_hash TEXT NOT NULL,
+  updated_by  TEXT NOT NULL DEFAULT '',
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+-- 申请的阶段实例：提交时按冻结策略生成，逐阶段推进（waiting → active → approved/rejected/expired）
+CREATE TABLE IF NOT EXISTS relreq_stages (
+  id               TEXT PRIMARY KEY,
+  request_id       TEXT NOT NULL,
+  project_id       TEXT NOT NULL,
+  stage_index      INTEGER NOT NULL,
+  role             TEXT NOT NULL,          -- 审核角色（冻结）
+  min_approvals    INTEGER NOT NULL,       -- 最少同意人数（冻结）
+  allow_resubmit   INTEGER NOT NULL DEFAULT 1, -- 驳回后是否允许重新提交（冻结）
+  ttl_ms           INTEGER NOT NULL DEFAULT 0, -- 审批有效期（冻结，0=不限）
+  status           TEXT NOT NULL DEFAULT 'waiting', -- waiting | active | approved | rejected | expired
+  started_at       INTEGER,                -- 阶段激活时间（有效期起算点）
+  expires_at       INTEGER,                -- 阶段截止时间（ttl_ms=0 时为 NULL）
+  decided_at       INTEGER,
+  decided_by       TEXT,                   -- 驳回人 / 达标时最后一名同意人
+  decision_comment TEXT,                   -- 阶段结论意见（驳回必填）
+  expire_reason    TEXT,                   -- 过期原因
+  reopened_count   INTEGER NOT NULL DEFAULT 0 -- 被负责人重新开启的次数
+);
+CREATE INDEX IF NOT EXISTS idx_relreq_stages_req ON relreq_stages(request_id, stage_index);
+
+-- 会签意见：每位审核人在每个阶段只有一条决定（唯一索引保证重复操作幂等），
+-- 意见、署名、时间全部保留
+CREATE TABLE IF NOT EXISTS relreq_decisions (
+  id          TEXT PRIMARY KEY,
+  request_id  TEXT NOT NULL,
+  stage_id    TEXT NOT NULL,
+  stage_index INTEGER NOT NULL,
+  project_id  TEXT NOT NULL,
+  reviewer    TEXT NOT NULL,               -- 审核人署名
+  role        TEXT NOT NULL,               -- 审核时所属角色（阶段冻结值）
+  action      TEXT NOT NULL,               -- approve | reject
+  comment     TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_relreq_decision ON relreq_decisions(stage_id, reviewer);
+CREATE INDEX IF NOT EXISTS idx_relreq_dec_req ON relreq_decisions(request_id, stage_index);
+
+-- 申请级事件流：提交/阶段激活/会签意见/阶段通过与驳回/过期/重新开启/
+-- 失效/重新提交/发布，构成发布页展示的完整审计记录
+CREATE TABLE IF NOT EXISTS relreq_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  TEXT NOT NULL,
+  request_id  TEXT NOT NULL,
+  stage_index INTEGER,
+  action      TEXT NOT NULL,
+  actor       TEXT NOT NULL,
+  detail      TEXT,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relreq_events_req ON relreq_events(request_id, id);
 
 -- ============ 版本差异报告 ============
 -- 生成时冻结比较双方（历史版本或发布快照）的快照内容与生成时间；
@@ -330,6 +396,23 @@ CREATE TABLE IF NOT EXISTS gate_counters (
 const cols = db.prepare('PRAGMA table_info(revisions)').all().map((c) => c.name);
 if (!cols.includes('meta')) {
   db.exec('ALTER TABLE revisions ADD COLUMN meta TEXT');
+}
+
+// 旧库迁移：release_requests 多阶段会签扩展列
+// （冻结策略/门禁事件、当前阶段、申请版本号与重新提交关联）
+const rqCols = db.prepare('PRAGMA table_info(release_requests)').all().map((c) => c.name);
+const rqMigrations = [
+  ['policy_snapshot', 'ALTER TABLE release_requests ADD COLUMN policy_snapshot TEXT'],
+  ['policy_hash', 'ALTER TABLE release_requests ADD COLUMN policy_hash TEXT'],
+  ['current_stage', 'ALTER TABLE release_requests ADD COLUMN current_stage INTEGER NOT NULL DEFAULT 0'],
+  ['gate_snapshot', 'ALTER TABLE release_requests ADD COLUMN gate_snapshot TEXT'],
+  ['gate_fingerprint', 'ALTER TABLE release_requests ADD COLUMN gate_fingerprint TEXT'],
+  ['version_no', 'ALTER TABLE release_requests ADD COLUMN version_no INTEGER NOT NULL DEFAULT 1'],
+  ['prev_request_id', 'ALTER TABLE release_requests ADD COLUMN prev_request_id TEXT'],
+  ['root_request_id', 'ALTER TABLE release_requests ADD COLUMN root_request_id TEXT'],
+];
+for (const [col, ddl] of rqMigrations) {
+  if (!rqCols.includes(col)) db.exec(ddl);
 }
 
 module.exports = { db, DATA_DIR };

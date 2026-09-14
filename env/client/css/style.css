@@ -251,6 +251,27 @@ main {
 .rel-card .rel-diff { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; }
 .small-btn.link { text-decoration: none; display: inline-block; color: var(--text); }
 
+/* ---------- 多阶段会签与审批策略 ---------- */
+.rel-card.relreq.is-expired { border-left-color: var(--warn); }
+.rel-policy-summary { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.rel-policy-summary b { color: var(--text); }
+.stage-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.stage-row input[type=text] { width: 110px; }
+.stage-row input[type=number] { width: 64px; }
+.stage-row .stage-no { color: var(--muted); font-size: 11px; min-width: 34px; }
+.stage-row label { font-size: 11px; color: var(--muted); display: inline-flex; gap: 3px; align-items: center; }
+.stage-chips { display: flex; gap: 5px; flex-wrap: wrap; margin: 6px 0 2px; }
+.stage-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); background: #11151c; }
+.stage-chip.active { color: var(--warn); border-color: var(--warn); }
+.stage-chip.approved { color: var(--ok); border-color: var(--ok); }
+.stage-chip.rejected, .stage-chip.expired { color: var(--danger); border-color: var(--danger); }
+.stage-detail { margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.stage-decision { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.stage-decision b { color: var(--text); }
+.relreq-events { margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.relreq-events .ev { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.relreq-events .ev b { color: var(--text); }
+
 /* ---------- 版本差异报告 ---------- */
 .dr-compare { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; margin-bottom: 10px; background: var(--panel2); }
 .dr-compare .new-row { margin-bottom: 8px; }
