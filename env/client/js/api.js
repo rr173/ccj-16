@@ -60,4 +60,24 @@ export const api = {
     return request('GET', `/api/diff-reports/${rid}${qs ? '?' + qs : ''}`);
   },
   diffReportDelete: (rid, author) => request('DELETE', `/api/diff-reports/${rid}`, { author }),
+  // ---- 发布回归门禁与变更订阅 ----
+  gateSubList: (id) => request('GET', `/api/projects/${id}/gate/subscriptions`),
+  gateSubCreate: (id, payload) => request('POST', `/api/projects/${id}/gate/subscriptions`, payload),
+  gateSubUpdate: (id, sid, payload) => request('PUT', `/api/projects/${id}/gate/subscriptions/${sid}`, payload),
+  gateSubPause: (id, sid, author) => request('POST', `/api/projects/${id}/gate/subscriptions/${sid}/pause`, { author }),
+  gateSubResume: (id, sid, author) => request('POST', `/api/projects/${id}/gate/subscriptions/${sid}/resume`, { author }),
+  gateEvalList: (id, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== '' && v != null)).toString();
+    return request('GET', `/api/projects/${id}/gate/evaluations${qs ? '?' + qs : ''}`);
+  },
+  gateEvalGet: (id, eid, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== '' && v != null)).toString();
+    return request('GET', `/api/projects/${id}/gate/evaluations/${eid}${qs ? '?' + qs : ''}`);
+  },
+  gateEvalRerun: (id, eid, author) => request('POST', `/api/projects/${id}/gate/evaluations/${eid}/rerun`, { author }),
+  gateEvalRetry: (id, eid, author) => request('POST', `/api/projects/${id}/gate/evaluations/${eid}/retry`, { author }),
+  gateStatus: (id, revisionId) => request('GET', `/api/projects/${id}/gate/status?revisionId=${revisionId}`),
+  gateExList: (id) => request('GET', `/api/projects/${id}/gate/exemptions`),
+  gateExCreate: (id, eid, payload) => request('POST', `/api/projects/${id}/gate/evaluations/${eid}/exemptions`, payload),
+  gateExRevoke: (xid, payload) => request('POST', `/api/gate/exemptions/${xid}/revoke`, payload),
 };

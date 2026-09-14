@@ -4,6 +4,7 @@ const express = require('express');
 const store = require('./store');
 const qc = require('./qc/store');
 const diffreport = require('./report/store');
+const gate = require('./gate/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -345,6 +346,102 @@ app.get('/api/diff-reports/:rid/export', wrap((req, res) => {
 // 删除：软删除并清空内容，此后内容不可再读（410），审计保留
 app.delete('/api/diff-reports/:rid', wrap((req, res) => {
   res.json(diffreport.deleteReport(req.params.rid, String(req.body?.author || '匿名')));
+}));
+
+/* ==================== 发布回归门禁与变更订阅 ==================== */
+
+// ---- 订阅：创建（基线 revision|release + 关注轨道/差异类型/关键词/质检级别）/ 列表 / 修改 / 暂停 / 恢复 ----
+app.get('/api/projects/:id/gate/subscriptions', wrap((req, res) => {
+  res.json({ subscriptions: gate.listSubscriptions(req.params.id) });
+}));
+
+app.post('/api/projects/:id/gate/subscriptions', wrap((req, res) => {
+  const b = req.body || {};
+  const result = gate.createSubscription(req.params.id, {
+    name: b.name,
+    baselineKind: b.baselineKind,
+    baselineRef: b.baselineRef,
+    trackIds: b.trackIds,
+    diffTypes: b.diffTypes,
+    keyword: b.keyword,
+    qcSeverities: b.qcSeverities,
+  }, String(b.author || '匿名'));
+  res.status(201).json(result);
+}));
+
+app.put('/api/projects/:id/gate/subscriptions/:sid', wrap((req, res) => {
+  const b = req.body || {};
+  res.json(gate.updateSubscription(req.params.id, req.params.sid, b, String(b.author || '匿名')));
+}));
+
+app.post('/api/projects/:id/gate/subscriptions/:sid/pause', wrap((req, res) => {
+  res.json(gate.setPaused(req.params.id, req.params.sid, true, String(req.body?.author || '匿名')));
+}));
+
+app.post('/api/projects/:id/gate/subscriptions/:sid/resume', wrap((req, res) => {
+  res.json(gate.setPaused(req.params.id, req.params.sid, false, String(req.body?.author || '匿名')));
+}));
+
+// ---- 评估事件：列表（可按订阅/状态/门禁/趋势/触发/版本筛选）、详情（逐项证据 + 筛选）、重跑、失败重试 ----
+app.get('/api/projects/:id/gate/evaluations', wrap((req, res) => {
+  res.json({
+    evaluations: gate.listEvaluations(req.params.id, {
+      subscriptionId: req.query.subscriptionId || '',
+      status: req.query.status || '',
+      gateHit: req.query.gateHit || '',
+      trend: req.query.trend || '',
+      trigger: req.query.trigger || '',
+      revisionId: req.query.revisionId || '',
+    }),
+  });
+}));
+
+app.get('/api/projects/:id/gate/evaluations/:eid', wrap((req, res) => {
+  res.json(gate.getEvaluationDetail(req.params.id, req.params.eid, {
+    trend: req.query.trend || '',
+    kind: req.query.kind || '',
+    trackId: req.query.trackId || '',
+    keyword: req.query.keyword || '',
+  }));
+}));
+
+// 手动重跑：已结束事件 → 新事件（新编号）；进行中 → 幂等复用
+app.post('/api/projects/:id/gate/evaluations/:eid/rerun', wrap((req, res) => {
+  const result = gate.rerun(req.params.id, req.params.eid, String(req.body?.author || '匿名'));
+  res.status(result.deduplicated ? 200 : 202).json(result);
+}));
+
+// 失败重试：复用同一事件行
+app.post('/api/projects/:id/gate/evaluations/:eid/retry', wrap((req, res) => {
+  res.status(202).json(gate.retry(req.params.id, req.params.eid, String(req.body?.author || '匿名')));
+}));
+
+// ---- 门禁状态：某版本当前是否被拦截（供发布页/申请页展示）----
+app.get('/api/projects/:id/gate/status', wrap((req, res) => {
+  const revisionId = String(req.query.revisionId || '');
+  if (!revisionId) return res.status(400).json({ error: '缺少 revisionId' });
+  const { pending, subscriptionCount } = gate.ensureEvaluated(req.params.id, revisionId, String(req.query.author || '匿名'));
+  const result = gate.checkGate(req.params.id, revisionId);
+  res.json({ ...result, pending, subscriptionCount });
+}));
+
+// ---- 具名豁免：创建（必填名称与理由，严格绑定事件+版本）/ 列表 / 撤销 ----
+app.get('/api/projects/:id/gate/exemptions', wrap((req, res) => {
+  res.json({ exemptions: gate.listExemptions(req.params.id) });
+}));
+
+app.post('/api/projects/:id/gate/evaluations/:eid/exemptions', wrap((req, res) => {
+  const b = req.body || {};
+  const result = gate.createExemption(req.params.id, req.params.eid, {
+    name: b.name, reason: b.reason,
+  }, String(b.author || '匿名'));
+  res.status(201).json(result);
+}));
+
+app.post('/api/gate/exemptions/:xid/revoke', wrap((req, res) => {
+  const row = gate.getExemption(req.params.xid);
+  if (!row) return res.status(404).json({ error: '豁免不存在' });
+  res.json(gate.revokeExemption(row.project_id, req.params.xid, { reason: req.body?.reason }, String(req.body?.author || '匿名')));
 }));
 
 const PORT = Number(process.env.PORT) || 3000;

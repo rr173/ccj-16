@@ -24,6 +24,8 @@ const { normalizeSnapshot, validate } = require('../validation');
 const rules = require('./rules');
 const exporter = require('./exporter');
 const differ = require('./diff');
+// 发布回归门禁：延迟访问以规避循环依赖（gate/store 内部再按需 require 本模块）
+const gate = () => require('../gate/store');
 
 const now = () => Date.now();
 const qid = () => 'q_' + crypto.randomBytes(9).toString('hex');
@@ -192,6 +194,7 @@ function finishJob(jobRow, findings, totalCues) {
     store.writeAudit(jobRow.project_id, jobRow.revision_id, [
       { field: `qcjob:${jobRow.id}`, action: 'qc-done', oldValue: null, newValue: JSON.stringify(summary) },
     ], jobRow.author);
+    emitQcChange({ projectId: jobRow.project_id, revisionId: jobRow.revision_id, reason: 'qc-done', jobId: jobRow.id, author: jobRow.author });
   }
 }
 
@@ -282,6 +285,10 @@ function ignoreFindings(projectId, { findingIds, baseRevId, reason, author }) {
   });
   txn();
   store.writeAudit(projectId, baseRevId, auditEntries, author);
+  // 阻断级处理决定变化：门禁据此对当前 HEAD 重新评估（新阻断被处理后可放行）
+  if (rows.some((f) => f.severity === 'blocker')) {
+    emitQcChange({ projectId, revisionId: baseRevId, reason: 'qc-ignore', author });
+  }
   return { updated: rows.length };
 }
 
@@ -360,6 +367,15 @@ function applyFixes(projectId, { findingIds, baseRevId, reason, author }) {
   });
   txn();
   return { status: 'committed', revision: rev, fixed: rows.length };
+}
+
+// 质检任务完成 / 阻断级处理决定变化后可注册的钩子（发布回归门禁据此对相关版本重新评估）
+const qcChangeHooks = [];
+function onQcChange(fn) { qcChangeHooks.push(fn); }
+function emitQcChange(payload) {
+  for (const fn of qcChangeHooks) {
+    try { fn(payload); } catch (e) { /* 钩子异常不影响质检主流程 */ }
+  }
 }
 
 /* --------- 提交钩子：新版本产生后，基于旧版本的「忽略」决定统一标记为过期 --------- */
@@ -602,6 +618,25 @@ function createRequest(projectId, { revisionId, confirmations = [], message = ''
     throw httpError(400, '警告级问题需随申请逐项确认，确认项与预检清单不一致', { missing, extra });
   }
 
+  // 发布回归门禁：先确保该版本在所有活跃订阅下都已评估（为缺失的订阅入队钉版事件），
+  // 有进行中评估时返回 423 要求稍后重试；命中门禁且无具名豁免时返回 403 阻止申请。
+  const ensured = gate().ensureEvaluated(projectId, revisionId, author);
+  if (ensured.pending) {
+    throw httpError(423, '发布回归门禁评估仍在运行，请稍后再提交发布申请', {
+      gatePending: true, subscriptionCount: ensured.subscriptionCount,
+    });
+  }
+  const gateResult = gate().checkGate(projectId, revisionId);
+  if (gateResult.blocked) {
+    store.writeAudit(projectId, revisionId, gateResult.unexempted.map((b) => ({
+      field: `gateeval:${b.eventId}`, action: 'gate-block', oldValue: 'release-request',
+      newValue: JSON.stringify({ eventNo: b.eventNo, subscription: b.subscriptionName }),
+    })), author);
+    throw httpError(403, '发布回归门禁未通过：存在相对基线新增/恶化的差异或新阻断级质检问题，需审核人针对本次事件创建具名豁免', {
+      gateBlocked: true, blockers: gateResult.unexempted,
+    });
+  }
+
   const existing = db
     .prepare(`SELECT * FROM release_requests WHERE project_id=? AND revision_id=? AND ${ACTIVE_REQ}`)
     .get(projectId, revisionId);
@@ -703,6 +738,23 @@ function publish(projectId, { requestId, author }) {
   if (fresh.status === 'invalidated') {
     throw httpError(409, `申请已失效（${INVALID_REASON_TEXT[fresh.invalid_reason] || fresh.invalid_reason}），请重新申请`, {
       invalidated: true, reason: fresh.invalid_reason,
+    });
+  }
+
+  // 发布回归门禁：申请批准后若产生新的门禁评估事件（新版本/手动重跑命中），
+  // 无针对该版本事件的具名豁免则阻止生成发布快照
+  const ensured = gate().ensureEvaluated(projectId, reqRow.revision_id, author);
+  if (ensured.pending) {
+    throw httpError(423, '发布回归门禁评估仍在运行，请稍后再生成发布快照', { gatePending: true });
+  }
+  const gateResult = gate().checkGate(projectId, reqRow.revision_id);
+  if (gateResult.blocked) {
+    store.writeAudit(projectId, reqRow.revision_id, gateResult.unexempted.map((b) => ({
+      field: `gateeval:${b.eventId}`, action: 'gate-block', oldValue: 'publish',
+      newValue: JSON.stringify({ eventNo: b.eventNo, subscription: b.subscriptionName }),
+    })), author);
+    throw httpError(403, '发布回归门禁未通过：存在未豁免的回归评估事件，需审核人针对本次事件创建具名豁免后才能发布', {
+      gateBlocked: true, blockers: gateResult.unexempted,
     });
   }
 
@@ -856,4 +908,5 @@ module.exports = {
   listReleases,
   getRelease,
   diffRelease,
+  onQcChange,
 };

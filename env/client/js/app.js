@@ -8,6 +8,7 @@ import { initImportModal } from './importer.js';
 import { initQc, closeQcHistory } from './qc.js';
 import { initRelease } from './release.js';
 import { initDiffReport, refreshDiffReports } from './diffreport.js';
+import { initGate, refreshGateTab } from './gate.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -139,6 +140,10 @@ function afterCommit(revision) {
   $('#proj-title').textContent = state.project.name;
   renderAll();
   renderHistory();
+  // 提交会异步触发门禁评估；门禁页若已打开稍后刷新
+  if (document.querySelector('.tabs button[data-tab="gate"]').classList.contains('active')) {
+    setTimeout(refreshGateTab, 400);
+  }
 }
 
 function enterConflict(result, mineSnapshot) {
@@ -243,6 +248,7 @@ function bind() {
   });
   initRelease({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
   initDiffReport({ toast, getAuthor, refreshAudit: renderAudit, locateCue: handlers.locateCue });
+  initGate({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
   $('#qc-history-close').addEventListener('click', closeQcHistory);
 
   subscribe((reason) => {

@@ -272,6 +272,20 @@ main {
 #dr-table td.dr-old, #dr-table td.dr-new { max-width: 220px; white-space: pre-wrap; word-break: break-all; font-size: 11px; }
 #dr-table .dr-locate { white-space: nowrap; }
 
+/* ---------- 发布回归门禁 ---------- */
+.gate-sub.paused { opacity: .68; border-style: dashed; }
+.gate-eval { border-left: 3px solid var(--ok); }
+.gate-eval.hit { border-left-color: var(--danger); }
+.gate-trend {
+  font-size: 10px; padding: 0 7px; border-radius: 10px; background: #11151c; white-space: nowrap;
+}
+.gate-trend.new { color: var(--danger); }
+.gate-trend.worsened { color: var(--warn); }
+.gate-trend.persisting { color: var(--warn); }
+.gate-trend.recovered { color: var(--ok); }
+#gate-eval-table td { vertical-align: top; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-width: 320px; }
+#gate-eval-table td.dr-locate { white-space: nowrap; }
+
 /* ---------- 启动页 ---------- */
 #landing {
   max-width: 560px; margin: 8vh auto; background: var(--panel); border: 1px solid var(--border);

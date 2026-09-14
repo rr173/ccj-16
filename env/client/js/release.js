@@ -5,7 +5,7 @@ import { state } from './state.js';
 import { msToSrt } from './time.js';
 
 let ctx = null;
-const rel = { preflight: null, checked: new Set(), releases: [], requests: [], revisions: [] };
+const rel = { preflight: null, checked: new Set(), releases: [], requests: [], revisions: [], gateStatus: null };
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -71,14 +71,23 @@ function activeRequestFor(revisionId) {
 async function runPreflight() {
   const revisionId = $('#rel-rev-select').value;
   try {
-    // 预检同时触发服务端对旧申请的复检（通过列表刷新）
+    // 预检同时触发服务端对旧申请的复检（通过列表刷新）；并行拉取门禁状态（缺失评估会触发入队）
     const [p] = await Promise.all([
       api.releasePreflight(state.project.id, revisionId),
       refreshRequestsOnly(),
+      loadGateBlocks(revisionId),
     ]);
     rel.preflight = p;
     rel.checked = new Set();
     renderPreflight();
+    // 门禁评估可能仍在运行：短轮询直到完成再刷新一次门禁区块
+    if (rel.gateStatus?.pending) {
+      for (let i = 0; i < 30 && rel.gateStatus?.pending; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        await loadGateBlocks(revisionId);
+        renderPreflight();
+      }
+    }
   } catch (e) {
     ctx.toast('预检失败：' + e.message, 'error');
   }
@@ -96,6 +105,7 @@ function renderPreflight() {
   const wrap = $('#rel-preflight');
   if (!p) return;
   const parts = [];
+  parts.push(gateGateHtml(p));
   parts.push(p.hardErrors.length
     ? `<div class="rel-gate bad">✗ 时间轴硬约束未通过：${esc(p.hardErrors[0].message)}（共 ${p.hardErrors.length} 处）</div>`
     : '<div class="rel-gate ok">✓ 时间轴硬约束通过（无反向区间）</div>');
@@ -135,7 +145,52 @@ function renderPreflight() {
       updateApplyButton();
     });
   });
+  wrap.querySelectorAll('[data-exempt]').forEach((btn) => {
+    btn.addEventListener('click', () => createGateExemption(btn.dataset.exempt));
+  });
   updateApplyButton();
+}
+
+/* ---------- 发布回归门禁：403 时展示命中事件与豁免入口 ---------- */
+
+async function loadGateBlocks(revisionId) {
+  try {
+    const gs = await api.gateStatus(state.project.id, revisionId);
+    rel.gateStatus = gs;
+  } catch (e) {
+    rel.gateStatus = null;
+  }
+}
+
+function gateGateHtml(p) {
+  const gs = rel.gateStatus;
+  if (!gs || gs.subscriptionCount === 0) return '';
+  if (gs.pending) {
+    return '<div class="rel-gate warn">⏳ 发布回归门禁评估运行中，请稍后重试提交…</div>';
+  }
+  if (!gs.blocked) return '<div class="rel-gate ok">✓ 发布回归门禁通过（所有订阅均无未豁免回归）</div>';
+  const rows = gs.unexempted.map((b) => `
+    <div class="rel-item bad">
+      ✗ 订阅「${esc(b.subscriptionName)}」事件 <b>${esc(b.eventNo)}</b>：
+      新增 ${b.counts.new} · 恶化 ${b.counts.worsened} · 持续 ${b.counts.persisting} · 新质检问题 ${b.counts.qcNew}
+      <div class="row" style="margin-top:4px"><button class="small-btn primary" data-exempt="${esc(b.eventId)}">审核人创建具名豁免…</button></div>
+    </div>`).join('');
+  return `<div class="rel-gate bad">✗ 发布回归门禁未通过：需审核人针对<b>本次事件与该版本</b>创建具名豁免（填写理由）；豁免不能用于后续新版本。</div>${rows}`;
+}
+
+async function createGateExemption(eventId) {
+  const name = prompt('具名豁免（名称/审核具名）：', '');
+  if (name == null || !name.trim()) return ctx.toast('豁免必须具名', 'error');
+  const reason = prompt('豁免理由（必填，写入审计）：', '');
+  if (reason == null || !reason.trim()) return ctx.toast('豁免必须填写理由', 'error');
+  try {
+    await api.gateExCreate(state.project.id, eventId, { name: name.trim(), reason: reason.trim(), author: ctx.getAuthor() });
+    ctx.toast('豁免已创建，可继续发布流程', 'ok');
+    ctx.refreshAudit?.();
+    await runPreflight();
+  } catch (e) {
+    ctx.toast('创建豁免失败：' + e.message, 'error');
+  }
 }
 
 function updateApplyButton() {
@@ -193,7 +248,16 @@ async function doApply() {
       rel.preflight = e.data.preflight;
       renderPreflight();
     }
-    ctx.toast('申请失败：' + e.message, 'error');
+    if (e.data?.gateBlocked) {
+      await loadGateBlocks(p.revisionId);
+      renderPreflight();
+      ctx.toast('被发布回归门禁拦截：请审核人针对命中事件创建具名豁免', 'error');
+    } else if (e.status === 423 || e.data?.gatePending) {
+      ctx.toast('门禁评估仍在运行，请稍候重试', 'error');
+      setTimeout(runPreflight, 800);
+    } else {
+      ctx.toast('申请失败：' + e.message, 'error');
+    }
   }
 }
 
@@ -240,7 +304,13 @@ async function doPublish(requestId) {
   } catch (e) {
     await refreshRequestsOnly();
     if (rel.preflight) renderPreflight();
-    ctx.toast('发布失败：' + e.message, 'error');
+    if (e.data?.gateBlocked) {
+      await loadGateBlocks(rel.preflight?.revisionId || '');
+      if (rel.preflight) renderPreflight();
+      ctx.toast('被发布回归门禁拦截：需对命中事件创建具名豁免', 'error');
+    } else {
+      ctx.toast('发布失败：' + e.message, 'error');
+    }
   }
 }
 

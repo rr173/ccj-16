@@ -227,6 +227,11 @@ export async function renderAudit() {
       'relreq-publish': '申请生成发布', 'relreq-invalidate': '申请自动失效',
       publish: '发布快照', withdraw: '撤销发布',
       'diff-create': '生成差异报告', 'diff-view': '查看差异报告', 'diff-export': '导出差异报告', 'diff-delete': '删除差异报告',
+      'gatesub-create': '创建门禁订阅', 'gatesub-update': '修改门禁订阅',
+      'gatesub-pause': '暂停门禁订阅', 'gatesub-resume': '恢复门禁订阅',
+      'gateeval-queue': '评估入队', 'gateeval-start': '评估开始', 'gateeval-done': '评估完成',
+      'gateeval-fail': '评估失败', 'gateeval-retry': '评估重试',
+      'gate-block': '门禁拦截', 'gateex-create': '创建豁免', 'gateex-revoke': '撤销豁免', 'gatenotify': '门禁通知',
     }[a.action] || a.action;
     div.innerHTML = `
       <div><span class="field">${escapeHtml(a.field)}</span> · ${actionLabel}</div>

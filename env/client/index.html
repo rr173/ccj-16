@@ -71,6 +71,7 @@
           <button data-tab="cues" class="active">句子</button>
           <button data-tab="tracks">轨道</button>
           <button data-tab="qc">质检</button>
+          <button data-tab="gate">门禁</button>
           <button data-tab="release">发布</button>
           <button data-tab="history">版本</button>
           <button data-tab="audit">审计</button>
@@ -126,6 +127,45 @@
             </div>
             <div id="qc-findings"></div>
           </div>
+        </div>
+        <div class="tab-pane" data-pane="gate">
+          <div class="pane-section-title">发布回归门禁订阅</div>
+          <p style="color:var(--muted);font-size:11px;margin:0 0 8px">
+            为项目创建订阅并指定基线（历史版本或发布快照）与关注条件；项目产生新版本、质检完成或提交发布申请时异步生成评估事件（唯一编号）。
+            命中门禁的版本会被服务端阻止提交发布申请/生成发布快照，除非审核人针对<b>本次事件与该版本</b>创建具名豁免——豁免不能绕过后续新版本。
+          </p>
+          <button id="gate-new-btn" class="small-btn primary" style="margin-bottom:8px">+ 新建订阅</button>
+          <div id="gate-subs"></div>
+
+          <div class="pane-section-title">评估事件</div>
+          <div class="qc-filters">
+            <select id="gate-filter-sub"><option value="">全部订阅</option></select>
+            <select id="gate-filter-status">
+              <option value="">全部状态</option>
+              <option value="queued">排队中</option>
+              <option value="running">运行中</option>
+              <option value="done">已完成</option>
+              <option value="failed">失败</option>
+            </select>
+            <select id="gate-filter-hit">
+              <option value="">门禁全部</option>
+              <option value="true">仅命中</option>
+              <option value="false">仅未命中</option>
+            </select>
+            <select id="gate-filter-trigger">
+              <option value="">全部触发</option>
+              <option value="commit">新版本</option>
+              <option value="qc">质检</option>
+              <option value="release-request">发布申请</option>
+              <option value="manual">手动</option>
+            </select>
+            <button id="gate-filter-apply" class="small-btn">筛选</button>
+            <button id="gate-refresh" class="small-btn">刷新</button>
+          </div>
+          <div id="gate-evals"></div>
+
+          <div class="pane-section-title">具名豁免</div>
+          <div id="gate-exemptions"></div>
         </div>
         <div class="tab-pane" data-pane="release">
           <div class="pane-section-title">从版本创建发布快照（预检 → 申请 → 审批 → 发布）</div>
@@ -279,6 +319,74 @@
       </div>
       <div class="modal-footer">
         <button id="dr-modal-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 门禁订阅编辑弹窗 -->
+  <div class="modal-mask" id="gate-sub-modal">
+    <div class="modal">
+      <h2 id="gate-sub-title">新建门禁订阅</h2>
+      <div class="hint">基线内容在保存时冻结；此后发布被撤销也不影响评估。</div>
+      <div class="new-row">
+        <span style="min-width:64px">名称</span>
+        <input id="gate-sub-name" placeholder="例如：发布前回归门禁" style="flex:1" />
+      </div>
+      <div class="new-row">
+        <span style="min-width:64px">基线</span>
+        <select id="gate-sub-baseline" style="flex:1"></select>
+      </div>
+      <div class="new-row">
+        <span style="min-width:64px">关注轨道</span>
+        <div id="gate-sub-tracks" style="flex:1;display:flex;gap:10px;flex-wrap:wrap"></div>
+      </div>
+      <div class="new-row">
+        <span style="min-width:64px">差异类型</span>
+        <div id="gate-sub-types" style="flex:1;display:flex;gap:10px;flex-wrap:wrap"></div>
+      </div>
+      <div class="new-row">
+        <span style="min-width:64px">质检级别</span>
+        <div id="gate-sub-sev" style="flex:1;display:flex;gap:10px"></div>
+      </div>
+      <div class="new-row">
+        <span style="min-width:64px">关键词</span>
+        <input id="gate-sub-keyword" placeholder="可选，命中差异项文本/证据" style="flex:1" />
+      </div>
+      <div class="modal-footer">
+        <button id="gate-sub-cancel">取消</button>
+        <button class="primary" id="gate-sub-save">保存并立即评估</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 门禁评估详情弹窗 -->
+  <div class="modal-mask" id="gate-eval-modal">
+    <div class="modal wide">
+      <h2 id="gate-eval-title">评估事件</h2>
+      <div id="gate-eval-meta" class="import-meta"></div>
+      <div id="gate-eval-gate"></div>
+      <div class="qc-filters">
+        <select id="gate-detail-trend">
+          <option value="">全部趋势</option>
+          <option value="new">新增</option>
+          <option value="worsened">恶化</option>
+          <option value="persisting">持续</option>
+          <option value="recovered">恢复</option>
+        </select>
+        <select id="gate-detail-kind">
+          <option value="">差异+质检</option>
+          <option value="diff">仅差异</option>
+          <option value="qc">仅质检</option>
+        </select>
+        <input id="gate-detail-keyword" placeholder="关键词筛选" style="flex:1;min-width:120px" />
+        <button id="gate-detail-apply" class="small-btn primary">应用</button>
+        <span id="gate-detail-count" style="color:var(--muted);font-size:12px"></span>
+      </div>
+      <div class="import-table-wrap" style="max-height:52vh">
+        <table class="import-table" id="gate-eval-table"></table>
+      </div>
+      <div class="modal-footer">
+        <button id="gate-eval-close">关闭</button>
       </div>
     </div>
   </div>

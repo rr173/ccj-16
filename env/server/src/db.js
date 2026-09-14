@@ -218,6 +218,112 @@ CREATE INDEX IF NOT EXISTS idx_diffreport_project ON diff_reports(project_id, cr
 -- 幂等：同一项目 + 同一对版本 + 同一组筛选条件只存在一个有效报告，重复生成返回同一报告
 CREATE UNIQUE INDEX IF NOT EXISTS uq_diffreport_active
   ON diff_reports(project_id, pair_hash, filter_hash) WHERE status = 'active';
+
+-- ============ 发布回归门禁与变更订阅 ============
+
+-- 订阅：用户可就同一项目创建多个，分别指定基线（历史版本或发布快照）、
+-- 关注轨道、差异类型、关键词与质检严重级别。暂停后不随提交触发评估，但手动重跑仍可用。
+CREATE TABLE IF NOT EXISTS gate_subscriptions (
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  baseline_kind   TEXT NOT NULL,             -- revision | release
+  baseline_ref    TEXT NOT NULL,             -- 版本 id 或发布快照 id
+  baseline_label  TEXT NOT NULL,
+  baseline_rev_id TEXT NOT NULL,             -- 基线落到的版本（快照取其来源版本）
+  baseline_snapshot TEXT NOT NULL,           -- 创建/修改订阅时冻结的基线内容（快照撤销也不影响评估）
+  track_ids       TEXT NOT NULL DEFAULT '[]',-- 关注轨道；[] 表示全部轨道
+  diff_types      TEXT NOT NULL DEFAULT '[]',-- 关注差异类型 added/deleted/track/time/text/lock；[] 表示全部
+  keyword         TEXT NOT NULL DEFAULT '',  -- 关键词（命中差异项的文本/轨道等）
+  qc_severities   TEXT NOT NULL DEFAULT '["blocker"]', -- 关注的质检严重级别
+  status          TEXT NOT NULL DEFAULT 'active',      -- active | paused
+  config_hash     TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  updated_by      TEXT,
+  updated_at      INTEGER,
+  paused_by       TEXT,
+  paused_at       INTEGER,
+  resumed_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_gatesub_project ON gate_subscriptions(project_id, created_at);
+
+-- 评估（唯一事件编号 GATE-项目序号-序号）：每次触发针对一个目标版本异步重算，
+-- 始终以触发时的最新 HEAD（或发布申请显式指定的旧版本）为目标，逐项记录
+-- 相对基线新增/恶化/恢复/持续的差异与新出现的阻断级质检问题。
+-- target_revision_id 对同一订阅可能多次评估（不同 HEAD / 手动重跑）。
+CREATE TABLE IF NOT EXISTS gate_evaluations (
+  id                  TEXT PRIMARY KEY,
+  event_no            TEXT NOT NULL,         -- 项目内唯一事件编号 GATE-0001-000007
+  project_id          TEXT NOT NULL,
+  subscription_id     TEXT NOT NULL,
+  target_revision_id  TEXT NOT NULL,
+  trigger             TEXT NOT NULL,         -- commit | release-request | manual
+  triggered_by        TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+  config_snapshot     TEXT NOT NULL,         -- 冻结的订阅条件（轨道/类型/关键词/级别）
+  config_hash         TEXT NOT NULL,
+  baseline_kind       TEXT NOT NULL,
+  baseline_ref        TEXT NOT NULL,
+  baseline_label      TEXT NOT NULL,
+  baseline_rev_id     TEXT NOT NULL,
+  baseline_snapshot   TEXT NOT NULL,
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  items               TEXT,                  -- 逐项证据（完成后冻结）
+  summary             TEXT,                  -- {counts:{new,worsened,recovered,persisting,qcNew}, gateHit}
+  result_hash         TEXT,                  -- 结果指纹：同订阅同版本同结果的重跑直接复用，不产生重复结果/通知
+  gate_hit            INTEGER NOT NULL DEFAULT 0,
+  head_at_start       TEXT,                  -- 入队时的项目 HEAD
+  error               TEXT,
+  notif_status        TEXT NOT NULL DEFAULT 'none', -- none | sent | skipped（与上一事件结果相同，跳过通知）
+  deduplicated        INTEGER NOT NULL DEFAULT 0,    -- 1：重跑命中已有同结果事件，复用未重算
+  created_at          INTEGER NOT NULL,
+  started_at          INTEGER,
+  finished_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_gateeval_project ON gate_evaluations(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gateeval_sub ON gate_evaluations(subscription_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gateeval_target ON gate_evaluations(project_id, target_revision_id);
+-- 事件编号项目内唯一
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gateeval_event_no ON gate_evaluations(project_id, event_no);
+-- 进行中的评估去重：同一订阅 + 同一目标版本 + 同一触发来源只允许一个未完成事件，
+-- 重复触发/重复重跑命中该索引即复用，不产生重复结果与重复通知。
+-- commit 事件以目标版本为最新 HEAD 入队，worker 执行时总是重定向到当时最新 HEAD
+-- （并发新提交合并到同一事件），其并发去重由应用层按订阅串行合并保证。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gateeval_inflight
+  ON gate_evaluations(subscription_id, target_revision_id, trigger)
+  WHERE status IN ('queued', 'running') AND trigger IN ('release-request','qc','manual');
+
+-- 具名豁免：门禁命中后，只有审核人针对「本次事件 + 该版本」创建具名豁免（必填理由），
+-- 才允许基于该版本提交发布申请/生成快照。豁免严格绑定事件与版本，
+-- 新版本产生新的评估事件后必须重新申请豁免，不能被沿用。
+CREATE TABLE IF NOT EXISTS gate_exemptions (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL,
+  event_id      TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  revision_id   TEXT NOT NULL,              -- 严格绑定的版本
+  name          TEXT NOT NULL,              -- 具名（豁免名称/审核具名）
+  reviewer      TEXT NOT NULL,              -- 创建豁免的审核人
+  reason        TEXT NOT NULL,              -- 必填理由
+  scope         TEXT NOT NULL DEFAULT 'all', -- all | items（保留：默认整事件豁免）
+  item_keys     TEXT NOT NULL DEFAULT '[]',
+  created_at    INTEGER NOT NULL,
+  revoked_by    TEXT,
+  revoked_at    INTEGER,
+  revoke_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gateex_event ON gate_exemptions(event_id);
+CREATE INDEX IF NOT EXISTS idx_gateex_rev ON gate_exemptions(project_id, revision_id);
+-- 同一事件只允许一个有效豁免
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gateex_event
+  ON gate_exemptions(event_id) WHERE revoked_at IS NULL;
+
+-- 项目内事件序号计数器
+CREATE TABLE IF NOT EXISTS gate_counters (
+  project_id TEXT PRIMARY KEY,
+  seq        INTEGER NOT NULL DEFAULT 0
+);
 `);
 
 // 旧库迁移：revisions.meta（导入/回滚清单）
