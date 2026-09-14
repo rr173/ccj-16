@@ -96,4 +96,16 @@ export const api = {
   discResolve: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/resolve`, payload),
   discReopen: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/reopen`, payload),
   discRelocate: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/relocate`, payload),
+  // ---- 多版本字幕盲审对照 ----
+  blindList: (id) => request('GET', `/api/projects/${id}/blind-rounds`),
+  blindCreate: (id, payload) => request('POST', `/api/projects/${id}/blind-rounds`, payload),
+  blindDetail: (id, rid) => request('GET', `/api/projects/${id}/blind-rounds/${rid}`),
+  blindReview: (rid, reviewer) => request('GET', `/api/blind-rounds/${rid}/review?reviewer=${encodeURIComponent(reviewer)}`),
+  blindSave: (rid, payload) => request('PUT', `/api/blind-rounds/${rid}/responses`, payload),
+  blindSubmit: (rid, payload) => request('POST', `/api/blind-rounds/${rid}/submit`, payload),
+  blindReject: (rid, payload) => request('POST', `/api/blind-rounds/${rid}/reject`, payload),
+  blindReveal: (rid, author) => request('POST', `/api/blind-rounds/${rid}/reveal`, { author }),
+  blindClose: (rid, author) => request('POST', `/api/blind-rounds/${rid}/close`, { author }),
+  blindResult: (rid) => request('GET', `/api/blind-rounds/${rid}/result`),
+  blindEvents: (rid) => request('GET', `/api/blind-rounds/${rid}/events`),
 };

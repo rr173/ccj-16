@@ -10,6 +10,7 @@ import { initRelease } from './release.js';
 import { initDiffReport, refreshDiffReports } from './diffreport.js';
 import { initGate, refreshGateTab } from './gate.js';
 import { initDiscussion, refreshDiscussions, openThread } from './discussion.js';
+import { initBlindReview, refreshBlind } from './blindreview.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -270,6 +271,7 @@ function bind() {
   initDiffReport({ toast, getAuthor, refreshAudit: renderAudit, locateCue: handlers.locateCue });
   initGate({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
   initDiscussion({ toast, getAuthor, locate: handlers.locate });
+  initBlindReview({ toast, getAuthor, refreshAudit: renderAudit });
   $('#disc-badge').addEventListener('click', () => {
     document.querySelector('.tabs button[data-tab="disc"]').click();
   });

@@ -72,6 +72,7 @@
           <button data-tab="cues" class="active">句子</button>
           <button data-tab="tracks">轨道</button>
           <button data-tab="disc">讨论</button>
+          <button data-tab="blind">盲审</button>
           <button data-tab="qc">质检</button>
           <button data-tab="gate">门禁</button>
           <button data-tab="release">发布</button>
@@ -112,6 +113,22 @@
             <button id="disc-refresh" class="small-btn">刷新</button>
           </div>
           <div id="disc-list"></div>
+        </div>
+        <div class="tab-pane" data-pane="blind">
+          <div class="pane-section-title">创建盲审轮次（从同一项目选 2~3 个历史版本，创建时冻结内容）</div>
+          <div class="new-row">
+            <input id="blind-title" placeholder="轮次标题（可选）" style="flex:1" />
+            <input id="blind-min" type="number" min="1" value="2" style="width:130px"
+              title="最少有效提交人数：达到前不能揭示来源或关闭" />
+            <button id="blind-create-btn" class="small-btn primary">创建盲审轮次</button>
+          </div>
+          <div id="blind-rev-picker" class="blind-rev-picker"></div>
+          <div class="pane-section-title" style="display:flex;align-items:center;gap:8px">
+            <span>盲审轮次</span>
+            <button id="blind-refresh" class="small-btn">刷新</button>
+          </div>
+          <div id="blind-rounds"></div>
+          <div id="blind-view"></div>
         </div>
         <div class="tab-pane" data-pane="qc">
           <div class="pane-section-title">质量规则（项目级默认）</div>
@@ -324,6 +341,17 @@
       <div id="qc-history-body"></div>
       <div class="modal-footer">
         <button id="qc-history-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 盲审操作记录弹窗 -->
+  <div class="modal-mask" id="blind-events-modal">
+    <div class="modal">
+      <h2>盲审操作记录</h2>
+      <div id="blind-events-body"></div>
+      <div class="modal-footer">
+        <button id="blind-events-close">关闭</button>
       </div>
     </div>
   </div>

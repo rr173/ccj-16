@@ -452,6 +452,70 @@ CREATE TABLE IF NOT EXISTS discussion_event_seq (
   discussion_id TEXT PRIMARY KEY,
   seq            INTEGER NOT NULL DEFAULT 0
 );
+
+-- ============ 多版本字幕盲审对照 ============
+
+-- 盲审轮次：创建时冻结 2~3 个历史版本的内容，并按稳定编号 + 时间接近度 + 文本相似度
+-- 组成对照项；无法可靠对应的内容单列在 unmatched，绝不硬配成一组。
+-- versions/items/unmatched 均为创建时冻结的 JSON，此后项目继续编辑不影响本轮。
+-- 候选来源（槽位→版本）在达到最少有效提交人数前不出现在任何审阅/进度/导出接口中。
+CREATE TABLE IF NOT EXISTS blind_rounds (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL,
+  title          TEXT NOT NULL DEFAULT '',
+  min_submitters INTEGER NOT NULL,          -- 创建时设定的最少有效提交人数（达到前不能揭示来源/关闭）
+  status         TEXT NOT NULL DEFAULT 'open', -- open | closed
+  versions       TEXT NOT NULL,             -- 冻结 [{slot, revisionId, label, author, message, snapshot}]
+  items          TEXT NOT NULL,             -- 冻结对照项 [{key, matchedBy, similarity, candidates:[{slot, cueId, trackId, trackName, start, end, text, locked}]}]
+  unmatched      TEXT NOT NULL,             -- 冻结单列内容 [{slot, cueId, trackId, trackName, start, end, text, locked, reason}]
+  version_count  INTEGER NOT NULL,
+  item_count     INTEGER NOT NULL,
+  unmatched_count INTEGER NOT NULL,
+  result         TEXT,                      -- 关闭时冻结的结果（票数/意见/胜出版本/单列内容，来源已揭示）
+  created_by     TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  revealed_by    TEXT,
+  revealed_at    INTEGER,
+  closed_by      TEXT,
+  closed_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_blindround_project ON blind_rounds(project_id, created_at);
+
+-- 每位审阅人每轮一份提交记录：answers 以候选槽位存储（服务端按审阅人独立的
+-- 匿名顺序解码后落库）；version 为乐观锁，并发保存失配返回 409 + 当前结果，不静默覆盖。
+-- status: draft（保存中）→ submitted（已提交）→ rejected（被组织者拒绝，不计入有效人数，可改后重提）
+CREATE TABLE IF NOT EXISTS blind_submissions (
+  id           TEXT PRIMARY KEY,
+  round_id     TEXT NOT NULL REFERENCES blind_rounds(id) ON DELETE CASCADE,
+  project_id   TEXT NOT NULL,
+  reviewer     TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'draft', -- draft | submitted | rejected
+  answers      TEXT NOT NULL DEFAULT '{}',    -- {itemKey: {choice, slot, comment}}
+  version      INTEGER NOT NULL DEFAULT 0,    -- 乐观锁：每次保存/提交/拒绝 +1
+  submitted_at INTEGER,
+  rejected_by  TEXT,
+  rejected_at  INTEGER,
+  reject_reason TEXT,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_blindsub_reviewer ON blind_submissions(round_id, reviewer);
+
+-- 盲审操作记录（创建/保存/提交/拒绝/关闭/揭示来源），页面可查询；
+-- client_token 唯一索引保证同一保存/提交请求重复发送不产生重复记录。
+CREATE TABLE IF NOT EXISTS blind_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id   TEXT NOT NULL,
+  round_id     TEXT NOT NULL,
+  action       TEXT NOT NULL,              -- create | save | submit | reject | close | reveal
+  actor        TEXT NOT NULL,
+  detail       TEXT,
+  client_token TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_blindevent_round ON blind_events(round_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_blindevent_token ON blind_events(round_id, client_token)
+  WHERE client_token IS NOT NULL;
 `);
 
 // 旧库迁移：revisions.meta（导入/回滚清单）

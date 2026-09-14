@@ -7,6 +7,7 @@ const approval = require('./qc/approval');
 const diffreport = require('./report/store');
 const gate = require('./gate/store');
 const discussion = require('./discussion/store');
+const blind = require('./blind/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -532,6 +533,84 @@ app.post('/api/projects/:id/discussions/:did/relocate', wrap((req, res) => {
   const b = req.body || {};
   const result = discussion.relocate(req.params.id, req.params.did, b, String(b.author || '匿名'));
   res.json(result);
+}));
+
+/* ==================== 多版本字幕盲审对照 ==================== */
+
+// 创建轮次：从同一项目选 2~3 个历史版本，创建时冻结内容与对照分组，设定最少有效提交人数
+app.post('/api/projects/:id/blind-rounds', wrap((req, res) => {
+  const b = req.body || {};
+  const result = blind.createRound(req.params.id, {
+    revisionIds: b.revisionIds,
+    minSubmitters: b.minSubmitters,
+    title: b.title,
+  }, String(b.author || '匿名'));
+  res.status(201).json(result);
+}));
+
+// 轮次列表（未揭示前不含版本来源）
+app.get('/api/projects/:id/blind-rounds', wrap((req, res) => {
+  res.json({ rounds: blind.listRounds(req.params.id) });
+}));
+
+// 组织者详情：进度（人数/完成比例/逐项分歧程度）；达到门槛并揭示/关闭后才含来源
+app.get('/api/projects/:id/blind-rounds/:rid', wrap((req, res) => {
+  res.json({ round: blind.getRoundDetail(req.params.id, req.params.rid) });
+}));
+
+// 审阅人视图：匿名候选（A/B/C，每位审阅人顺序独立且稳定）+ 自己的进度；不含版本来源
+app.get('/api/blind-rounds/:rid/review', wrap((req, res) => {
+  res.json(blind.reviewPayload(req.params.rid, req.query.reviewer));
+}));
+
+// 保存进度：baseVersion 乐观锁（并发修改返回 409 + 当前结果），clientToken 幂等
+app.put('/api/blind-rounds/:rid/responses', wrap((req, res) => {
+  const b = req.body || {};
+  const result = blind.saveResponses(req.params.rid, {
+    reviewer: b.reviewer,
+    baseVersion: b.baseVersion,
+    answers: b.answers,
+    clientToken: b.clientToken,
+  });
+  res.json(result);
+}));
+
+// 提交（定稿）：全部作答后才可提交；重复提交幂等
+app.post('/api/blind-rounds/:rid/submit', wrap((req, res) => {
+  const b = req.body || {};
+  const result = blind.submit(req.params.rid, {
+    reviewer: b.reviewer,
+    expectedVersion: b.expectedVersion,
+    clientToken: b.clientToken,
+  });
+  res.json(result);
+}));
+
+// 组织者拒绝某份提交（必填理由，不计入有效人数，可改后重提）
+app.post('/api/blind-rounds/:rid/reject', wrap((req, res) => {
+  const b = req.body || {};
+  res.json(blind.rejectSubmission(req.params.rid, b.reviewer, { reason: b.reason }, String(b.author || '匿名')));
+}));
+
+// 揭示来源：达到最少有效提交人数后才允许；重复揭示幂等返回同一映射
+app.post('/api/blind-rounds/:rid/reveal', wrap((req, res) => {
+  res.json(blind.reveal(req.params.rid, String(req.body?.author || '匿名')));
+}));
+
+// 关闭轮次：达到门槛后生成冻结结果（平票保留为平票）；重复关闭返回同一份结果
+app.post('/api/blind-rounds/:rid/close', wrap((req, res) => {
+  const result = blind.close(req.params.rid, String(req.body?.author || '匿名'));
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+// 冻结结果（仅关闭后）：每项票数/意见/胜出版本/无法可靠配对的内容
+app.get('/api/blind-rounds/:rid/result', wrap((req, res) => {
+  res.json(blind.getResult(req.params.rid));
+}));
+
+// 操作记录：创建/保存/提交/拒绝/关闭/揭示来源
+app.get('/api/blind-rounds/:rid/events', wrap((req, res) => {
+  res.json({ events: blind.listEvents(req.params.rid) });
 }));
 
 const PORT = Number(process.env.PORT) || 3000;
