@@ -9,6 +9,7 @@ import { initQc, closeQcHistory } from './qc.js';
 import { initRelease } from './release.js';
 import { initDiffReport, refreshDiffReports } from './diffreport.js';
 import { initGate, refreshGateTab } from './gate.js';
+import { initDiscussion, refreshDiscussions, openThread } from './discussion.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -140,6 +141,8 @@ function afterCommit(revision) {
   $('#proj-title').textContent = state.project.name;
   renderAll();
   renderHistory();
+  // 提交后讨论可能已自动跟随或进入待重新定位，刷新徽标与列表
+  refreshDiscussions();
   // 提交会异步触发门禁评估；门禁页若已打开稍后刷新
   if (document.querySelector('.tabs button[data-tab="gate"]').classList.contains('active')) {
     setTimeout(refreshGateTab, 400);
@@ -218,6 +221,23 @@ const handlers = {
     document.querySelector('.tabs button[data-tab="cues"]').click();
     emit('select');
   },
+  // 讨论「跳到对应时间」：切到句子页签、选中并定位播放头（讨论始终对应最新版本）
+  async locate({ cueId = null, start = 0, trackId = null } = {}) {
+    pause();
+    if (state.viewingRevId) {
+      if (!confirm('讨论针对的是最新版本，是否离开历史只读视图并跳转？')) return;
+      await openProject(state.project.id);
+    }
+    document.querySelector('.tabs button[data-tab="cues"]').click();
+    if (cueId) {
+      state.selectedCueId = cueId;
+      emit('select');
+    }
+    seek(start);
+  },
+  openDiscussion(threadId) {
+    return openThread(threadId);
+  },
 };
 window.appHandlers = handlers;
 
@@ -249,6 +269,10 @@ function bind() {
   initRelease({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
   initDiffReport({ toast, getAuthor, refreshAudit: renderAudit, locateCue: handlers.locateCue });
   initGate({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
+  initDiscussion({ toast, getAuthor, locate: handlers.locate });
+  $('#disc-badge').addEventListener('click', () => {
+    document.querySelector('.tabs button[data-tab="disc"]').click();
+  });
   $('#qc-history-close').addEventListener('click', closeQcHistory);
 
   subscribe((reason) => {

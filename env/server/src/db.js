@@ -390,6 +390,68 @@ CREATE TABLE IF NOT EXISTS gate_counters (
   project_id TEXT PRIMARY KEY,
   seq        INTEGER NOT NULL DEFAULT 0
 );
+
+-- ============ 讨论串（可挂在单句或时间范围上，跨版本跟随/待重新定位） ============
+
+-- 讨论串：anchor_type=cue 时 anchor_id 为稳定句子编号；anchor_type=range 时为时间范围
+-- （anchor_start/anchor_end + anchor_track，'' 表示全部轨道）。
+-- anchor_status: anchored（已定位）| orphan（待重新定位：对应字幕被删除/拆分/无法唯一匹配）。
+-- 自动跟随时 anchor 指向新版本的句子；孤儿保留 last_anchor_* 作为旧位置记录。
+-- version 为乐观锁版本号：并发回复/解决/重开/重新定位用条件更新防止覆盖更新后的状态。
+CREATE TABLE IF NOT EXISTS discussions (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL,
+  anchor_type      TEXT NOT NULL,             -- cue | range
+  anchor_id        TEXT,                      -- cue 锚点：当前对应句子编号（orphan 时为 NULL）
+  anchor_track     TEXT,                      -- cue：所在轨（跟随跨轨移动）；range：范围轨（'' = 全部）
+  anchor_start     INTEGER NOT NULL,          -- 定位时间（cue=句开始；range=范围开始），用于跳转
+  anchor_end       INTEGER NOT NULL,          -- cue=句结束；range=范围结束
+  anchor_status    TEXT NOT NULL DEFAULT 'anchored', -- anchored | orphan
+  orphan_reason    TEXT,                      -- deleted | split | ambiguous | track-deleted
+  orphan_since_rev TEXT,                      -- 进入待重新定位的版本
+  orphan_detail    TEXT,                      -- JSON 旧位置快照与候选句子，供页面展示/人工选择
+  last_anchor_id   TEXT,                      -- 上一次有效锚点（孤儿时的旧位置句子编号）
+  last_anchor_track TEXT,
+  last_anchor_start INTEGER,
+  last_anchor_end   INTEGER,
+  title            TEXT NOT NULL DEFAULT '',
+  status           TEXT NOT NULL DEFAULT 'open', -- open | resolved（与 anchor_status 正交）
+  resolved_by      TEXT,
+  resolved_at      INTEGER,
+  created_by       TEXT NOT NULL,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  version          INTEGER NOT NULL DEFAULT 0   -- 乐观锁：每次消息/状态/定位变化 +1
+);
+CREATE INDEX IF NOT EXISTS idx_disc_project ON discussions(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_disc_cue ON discussions(project_id, anchor_id) WHERE anchor_status = 'anchored';
+CREATE INDEX IF NOT EXISTS idx_disc_orphan ON discussions(project_id, anchor_status) WHERE anchor_status = 'orphan';
+
+-- 讨论事件流（同时承载回复消息）：
+--   kind=message 为回复；create/resolve/reopen/relocate/auto-follow/orphan 为状态/定位变化。
+-- 定位事件 detail 记录旧位置、新位置与操作者，形成完整定位历史，页面可逐条查看。
+-- client_token 非空时建唯一索引：重复请求命中同一令牌直接返回原事件，不产生重复回复。
+CREATE TABLE IF NOT EXISTS discussion_events (
+  id           TEXT PRIMARY KEY,
+  seq          INTEGER NOT NULL,           -- 插入顺序（页面按时间线展示，不能用随机 id 排序）
+  discussion_id TEXT NOT NULL REFERENCES discussions(id) ON DELETE CASCADE,
+  project_id   TEXT NOT NULL,
+  kind         TEXT NOT NULL,             -- message | create | resolve | reopen | relocate | auto-follow | orphan
+  actor        TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',  -- kind=message 的回复正文
+  detail       TEXT,                      -- JSON：旧位置/新位置/原因/候选等
+  client_token TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_discevent_disc ON discussion_events(discussion_id, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_discevent_token ON discussion_events(project_id, client_token)
+  WHERE client_token IS NOT NULL;
+
+-- 讨论事件的每讨论串递增序号（插入顺序，供时间线按序展示）
+CREATE TABLE IF NOT EXISTS discussion_event_seq (
+  discussion_id TEXT PRIMARY KEY,
+  seq            INTEGER NOT NULL DEFAULT 0
+);
 `);
 
 // 旧库迁移：revisions.meta（导入/回滚清单）
@@ -413,6 +475,15 @@ const rqMigrations = [
 ];
 for (const [col, ddl] of rqMigrations) {
   if (!rqCols.includes(col)) db.exec(ddl);
+}
+
+// 旧库迁移：讨论事件插入顺序序号（新建库 DDL 已含）
+const deCols = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discussion_events'").get()
+  ? db.prepare('PRAGMA table_info(discussion_events)').all().map((c) => c.name)
+  : [];
+if (deCols.length && !deCols.includes('seq')) {
+  db.exec('ALTER TABLE discussion_events ADD COLUMN seq INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TABLE IF NOT EXISTS discussion_event_seq (discussion_id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0)`);
 }
 
 module.exports = { db, DATA_DIR };

@@ -2,6 +2,7 @@ import { state, subscribe, updateCue, addCue, deleteCue, addTrack, setDirty, emi
 import { violatedCueIds } from './rules.js';
 import { msToSrt, parseTime } from './time.js';
 import { api } from './api.js';
+import { openCreateOnCue, cueDiscMap, refreshDiscussions } from './discussion.js';
 
 export function initSidebar(handlers) {
   document.getElementById('add-cue-btn').addEventListener('click', () => {
@@ -28,6 +29,14 @@ export function initSidebar(handlers) {
       renderTrackList();
       renderTrackToggles();
     }
+    if (reason === 'load') refreshDiscussions();
+  });
+  // 讨论数据到达后重渲染句子列表，显示每句未解决徽标（不重复请求）；
+  // 用户正在句子输入框中编辑时不打断（提交/切项目后随 load 自然重绘）
+  window.addEventListener('discussions-loaded', () => {
+    const el = document.activeElement;
+    if (el?.closest('.cue-item')) return;
+    renderCueList();
   });
 }
 
@@ -42,6 +51,7 @@ export function renderCueList() {
   const wrap = document.getElementById('cue-list');
   const snap = state.snapshot;
   const vMap = violatedCueIds(snap);
+  const discMap = cueDiscMap();
   const cues = [...snap.cues].sort((a, b) => a.start - b.start);
 
   wrap.innerHTML = '';
@@ -62,6 +72,7 @@ export function renderCueList() {
         <input class="time-input" value="${msToSrt(cue.end)}" data-f="end" ${cue.locked ? 'disabled' : ''} />
         ${cueBadges(cue, vMap)}
         <span style="flex:1"></span>
+        <button class="small-btn" data-act="disc" title="在该句上发起/查看讨论">💬${discMap.get(cue.id) ? `<span class="disc-count">${discMap.get(cue.id)}</span>` : ''}</button>
         <button class="small-btn" data-act="lock">${cue.locked ? '🔒' : '🔓'}</button>
         <button class="small-btn danger" data-act="del" ${cue.locked ? 'disabled' : ''}>删</button>
       </div>
@@ -90,6 +101,10 @@ export function renderCueList() {
     });
     item.querySelector('textarea').addEventListener('input', (e) => {
       updateCue(cue.id, { text: e.target.value });
+    });
+    item.querySelector('[data-act=disc]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openCreateOnCue(cue.id);
     });
     item.querySelector('[data-act=lock]').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -232,6 +247,8 @@ export async function renderAudit() {
       'gateeval-queue': '评估入队', 'gateeval-start': '评估开始', 'gateeval-done': '评估完成',
       'gateeval-fail': '评估失败', 'gateeval-retry': '评估重试',
       'gate-block': '门禁拦截', 'gateex-create': '创建豁免', 'gateex-revoke': '撤销豁免', 'gatenotify': '门禁通知',
+      'disc-create': '创建讨论', 'disc-resolve': '解决讨论', 'disc-reopen': '重新打开讨论',
+      'disc-relocate': '重新定位讨论', 'disc-auto-follow': '讨论自动跟随', 'disc-orphan': '讨论待重新定位',
     }[a.action] || a.action;
     div.innerHTML = `
       <div><span class="field">${escapeHtml(a.field)}</span> · ${actionLabel}</div>

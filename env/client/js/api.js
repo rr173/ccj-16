@@ -84,4 +84,16 @@ export const api = {
   gateExList: (id) => request('GET', `/api/projects/${id}/gate/exemptions`),
   gateExCreate: (id, eid, payload) => request('POST', `/api/projects/${id}/gate/evaluations/${eid}/exemptions`, payload),
   gateExRevoke: (xid, payload) => request('POST', `/api/gate/exemptions/${xid}/revoke`, payload),
+  // ---- 讨论串（单句 / 时间范围） ----
+  discList: (id, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== '' && v != null)).toString();
+    return request('GET', `/api/projects/${id}/discussions${qs ? '?' + qs : ''}`);
+  },
+  discSummary: (id) => request('GET', `/api/projects/${id}/discussions/summary`),
+  discCreate: (id, payload) => request('POST', `/api/projects/${id}/discussions`, payload),
+  discGet: (id, did) => request('GET', `/api/projects/${id}/discussions/${did}`),
+  discReply: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/messages`, payload),
+  discResolve: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/resolve`, payload),
+  discReopen: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/reopen`, payload),
+  discRelocate: (id, did, payload) => request('POST', `/api/projects/${id}/discussions/${did}/relocate`, payload),
 };

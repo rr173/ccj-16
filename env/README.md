@@ -24,6 +24,7 @@
 | 发布快照 | 快照冻结句子、轨道、规则配置与质检摘要，可下载 SRT/VTT（全部轨道 + 单轨）；项目继续编辑不影响已发布内容；可将快照与任意后续版本**逐句对比**，可撤销发布（文件随即不可下载）；同一版本重复发布返回已有快照，不产生重复 |
 | 版本差异报告 | 「版本」页可选任意两个历史版本或发布快照生成**差异报告**：按稳定句子编号 + 时间接近度 + 文本相似度配对（跨轨移动、顺序变化、删除重建都能正确对齐，不按数组下标比较），逐项列出新增/删除/文本/时间/锁定/跨轨移动/未变化及旧值→新值、所属轨道与可定位句子链接；生成时冻结双方内容与生成时间；轨道/类型/关键词组合筛选，当前筛选可导出 JSON/CSV；同版本对 + 同筛选重复生成幂等复用同一报告；删除后内容不可再读，创建/查看/导出/删除全部写审计 |
 | 发布回归门禁 | 「门禁」页为项目创建多个**变更订阅**：各自指定一个发布快照或历史版本为基线（创建时冻结）与关注条件（轨道、差异类型、关键词、质检严重级别），可暂停/恢复。项目产生新版本、导入、质检完成/阻断处理或提交发布申请时，服务端异步生成带唯一事件编号（`GATE-XXXX-000001`…）的评估，逐项记录相对基线**新增/恶化/恢复/持续**的差异与**新出现且未处理**的阻断级质检问题，页面可查运行状态、逐项证据、基线/目标关联版本，并可按订阅/状态/门禁/趋势/触发/版本筛选，支持手动重跑（新事件）与失败重试（复用事件行、保留原因）。命中门禁时服务端**阻止基于该版本提交发布申请或生成发布快照**，除非审核人针对**本次事件 + 该版本**创建**具名豁免并填写理由**；豁免不能用于后续新版本（新版本必须重新评估）。并发新提交折叠为一次以最新 HEAD 重算的评估，重复触发/重跑不产生重复结果与重复通知。订阅变更、评估开始/完成/失败、门禁拦截、豁免、通知全部写审计 |
+| 讨论串 | 讨论可挂在**单句**（句子行 💬 按钮）或**时间范围**（讨论页「+ 在时间范围上发起讨论」，可指定轨道）上；成员可创建、回复、解决、重新打开。顶栏与讨论页汇总**未解决数量**（另单列「待重新定位」数），每条讨论可**一键跳到对应时间**（选中句子、定位播放头）。提交新版本后由提交钩子统一做跨版本跟随：稳定句子编号仍在即跟随（含文本/时间/跨轨修改）；编号消失时按「文本相似度 + 时间接近度」匹配——**唯一强匹配自动跟随并记录定位历史，对应字幕被删除、一句拆成多句（多候选）或证据不足无法唯一匹配时一律进入「待重新定位」，绝不悄悄挂到错误内容上**（保留旧位置与候选句子）。成员可在候选中一键重定位、手动选句或改挂时间范围；重定位事件保留**旧位置、新位置、操作者**。回复/解决/重开/重定位全部走事务内乐观锁（`WHERE version=?` 条件更新，并发写入失配返回 409 + 服务端当前状态，不丢消息、不覆盖），创建/回复/重定位携带 `clientToken` 唯一索引，**重复请求不产生重复回复**。状态变化与定位历史（创建/回复/解决/重开/自动跟随/待重新定位/人工重定位）在讨论详情与审计页均可查 |
 | Docker | `docker compose up -d`，SQLite 数据在命名卷 `/data` |
 
 ## 快速开始
@@ -43,8 +44,8 @@ docker compose up -d --build
 ## 测试
 
 ```bash
-npm test                  # 三向合并 + 批量导入/回滚 + 拖动推挤规则 + 质检规则引擎 + 差异报告匹配/筛选/导出 + 门禁订阅 + 审批策略 单测
-npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲突裁决->撤销->审计 / 质检->处理->发布->撤销 / 差异报告 / 门禁订阅->评估->豁免 / 多阶段会签审批 全流程
+npm test                  # 三向合并 + 批量导入/回滚 + 拖动推挤规则 + 质检规则引擎 + 差异报告匹配/筛选/导出 + 门禁订阅 + 审批策略 + 讨论锚点跟随 单测
+npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲突裁决->撤销->审计 / 质检->处理->发布->撤销 / 差异报告 / 门禁订阅->评估->豁免 / 多阶段会签审批 / 讨论跟随/孤儿/重定位/并发 全流程
 ```
 
 ## 使用要点
@@ -62,6 +63,7 @@ npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲�
 11. 「质检」页：先配规则（项目级默认 + 轨道级覆盖），再选版本「开始质检」；结果按轨道/级别/状态筛选，逐条或批量忽略（填理由）/接受安全修复。项目有新版本后旧处理会标「已过期」，需重新选择。
 12. 「发布」页：选版本「预检」→ 阻断全处理、警告随申请逐项勾选后「提交发布申请」→ 审核人在审批记录里「批准」（或填意见「驳回」）→ 批准后「生成发布快照」。申请期间版本产生新提交、阻断重新出现或警告确认变化，申请会自动标「已失效」，需重新预检申请；发布卡可下载 SRT/VTT、与任意后续版本逐句对比、撤销发布。
 13. 「门禁」页：「+ 新建订阅」选择基线（任意历史版本或发布快照）与关注轨道/差异类型/关键词/质检级别；版本提交、质检完成/阻断处理、提交发布申请都会触发异步评估。评估卡「查看证据」可看新增/恶化/恢复/持续逐项差异与新阻断质检问题、关联版本并定位句子；发布预检面板与发布按钮会显示门禁状态。命中门禁时由审核人在事件详情里「创建具名豁免…」（名称+理由必填，只对该事件与版本有效），此后该版本才能继续申请/发布；新版本会产生新事件，旧豁免不沿用。订阅可暂停/恢复，事件可手动重跑（新事件编号），失败可重试（同一事件、保留失败原因）。
+14. 「💬 讨论」：句子行的 💬 按钮在**单句**上发起讨论（带未解决条数徽标），讨论页可在**时间范围**上发起。讨论卡/详情中的「跳到对应时间」直接选中句子并定位播放头。提交新版本后：句子编号仍在的讨论自动跟随；删除后重建且能**唯一**强匹配的会自动跟随并在定位历史中留痕；**被删除、拆成多句或无法唯一匹配的讨论进入「待重新定位」**（顶栏与讨论页有计数），在详情页可从候选句一键重定位、手动选句或改挂时间范围，旧位置/新位置/操作者都记录在定位历史里。并发操作若发现讨论已被他人更新会提示并载入最新内容，重发请求不会生成重复回复。
 
 ## 合并语义（server/src/merge.js）
 
@@ -96,13 +98,27 @@ npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲�
 - **门禁接入**：`createRequest` 与 `publish` 先 `ensureEvaluated`（缺失则入队钉版评估，仍在运行返回 423），再 `checkGate`：每订阅只看该版本上配置最新的一次完成事件，命中且无有效豁免即 403 并写 `gate-block` 审计。
 - **豁免**：`gate_exemptions` 必须具名 + 必填理由，唯一索引保证一事件一豁免；绑定 `(event_id, revision_id)`——新版本/新结果指纹不匹配即失效，不能绕过后续新版本的重新评估；可撤销（必填理由）。审计动作：`gateeval-queue/start/done/fail/retry`、`gate-block`、`gateex-create/revoke`、`gatenotify`。
 
+## 讨论串（server/src/discussion/）
+
+- **锚点**：`discussions` 每行一串，`anchor_type=cue`（绑定稳定句子编号 + 当时所在轨/起止）或 `range`（毫秒时间范围 + 可选轨，`''` 为全部轨）。`anchor_status=anchored|orphan` 与业务状态 `status=open|resolved` **正交**：待重新定位的讨论仍可回复与解决。
+- **跨版本跟随**（提交钩子，随新版本事务执行）：以主父版本为旧快照、新版本为目标。① cue 编号仍在：跟随（文本/时间/跨轨改动都保留在同一串上）；② 编号消失：复用差异报告的「文本 bigram Dice + 时间接近度」匹配，**恰好一个强候选（sim≥0.5、time≥0.55、score≥0.6）才自动跟随**并写 `auto-follow` 事件（旧/新位置、候选评分），多候选写 `orphan:split`，证据不足写 `orphan:ambiguous`，无候选写 `orphan:deleted`；③ range 锚点只校验轨道存在性，轨道删除写 `orphan:track-deleted`。孤儿一律把旧锚点复制到 `last_anchor_*`、候选写入 `orphan_detail`，不做任何猜测挂载。三向合并的 merge 提交以其主父（HEAD）为映射基准。
+- **重新定位**：仅 orphan 可操作，目标句/范围在当前 HEAD 校验；`relocate` 事件保存旧位置（含原孤儿原因与候选）、新位置、操作者、版本，可在串内重复查看完整定位轨迹；重复请求凭 `client_token` 幂等。
+- **并发与幂等**：回复/解决/重开/重定位都在事务内执行 `UPDATE ... WHERE version=?` 条件更新（每次变化 version+1），并发写入一方失配即 409 并回传当前状态，调用方刷新后重试——不丢消息、不覆盖。同状态重复解决/重开直接幂等返回。`discussion_events (project_id, client_token)` 部分唯一索引保证创建/回复/重定位的重复 HTTP 请求（如网络重试）只产生一条记录，命中时返回原结果（`deduplicated`）。事件 `seq` 为每串递增序号，时间线严格按插入顺序展示。
+- **查询**：列表支持 `status / anchorStatus / cueId / q` 筛选并带每串回复数；`/discussions/summary` 返回 `unresolved / orphan / unresolvedOrphan` 汇总（顶栏轮询）；详情含锚点在 HEAD 的存在性上下文（用于跳转按钮与陈旧提示）。审计动作：`disc-create/resolve/reopen/relocate/auto-follow/orphan`。
+
 ## 版本树
 
 ```
 revisions(id, parent1_id 主父, parent2_id 合并的第二父,
           kind=create|edit|merge|import|rollback, snapshot, author, message, meta)
-audit(revision_id, field, action=add|edit|delete|resolve|skip|rollback|relreq-*|publish|withdraw|gatesub-*|gateeval-*|gate-block|gateex-*|gatenotify, old_value, new_value, author)
+audit(revision_id, field, action=add|edit|delete|resolve|skip|rollback|relreq-*|publish|withdraw|gatesub-*|gateeval-*|gate-block|gateex-*|gatenotify|disc-*, old_value, new_value, author)
 import_jobs(id, project_id, base_rev_id 用户看到的版本, head_rev_id 冲突时HEAD, content, options, meta, skips)
+discussions(id, anchor_type=cue|range, anchor_id/anchor_track/anchor_start/anchor_end 当前锚点,
+            anchor_status=anchored|orphan, orphan_reason=deleted|split|ambiguous|track-deleted,
+            orphan_detail 旧位置+候选, last_anchor_* 上一次有效锚点, status=open|resolved,
+            version 乐观锁)
+discussion_events(seq 每讨论串递增, kind=message|create|resolve|reopen|relocate|auto-follow|orphan,
+                  actor, body, detail 旧/新位置, client_token 幂等)
 ```
 
 普通提交父链为线性；三向合并/导入冲突裁决提交 `parent1 = 当时HEAD`、`parent2 = 提交者的分叉基点`，因此从任意历史版本分叉再保存都会保留完整的分支/合并关系。
@@ -119,9 +135,12 @@ server/src/qc/  rules.js（五类质量规则引擎）· store.js（任务/结�
               · exporter.js（SRT/VTT 渲染）· diff.js（快照逐句对比）· approval.js（多阶段会签与审批策略）
 server/src/report/ match.js（句子匹配 + 逐项差异）· store.js（报告生成/筛选/导出/删除）
 server/src/gate/ store.js（变更订阅 / 评估事件 / 门禁 / 具名豁免）
-client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/importer/qc/gate/release/diffreport/app）
+server/src/discussion/ match.js（锚点跨版本跟随匹配）· store.js（讨论/事件/乐观锁/幂等/提交钩子跟随）
+client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/importer/discussion/qc/gate/release/diffreport/app）
 test/         merge.test.js · import.test.js · drag.test.mjs · qc.test.js · diffreport.test.js · gate.test.js · approval.test.js
+              · discussion.test.js
               · e2e.test.js · import.e2e.test.js · qc.e2e.test.js · diffreport.e2e.test.js · gate.e2e.test.js · approval.e2e.test.js
+              · discussion.e2e.test.js
 Dockerfile · docker-compose.yml
 ```
 

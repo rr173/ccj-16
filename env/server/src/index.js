@@ -6,6 +6,7 @@ const qc = require('./qc/store');
 const approval = require('./qc/approval');
 const diffreport = require('./report/store');
 const gate = require('./gate/store');
+const discussion = require('./discussion/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -472,6 +473,65 @@ app.post('/api/gate/exemptions/:xid/revoke', wrap((req, res) => {
   const row = gate.getExemption(req.params.xid);
   if (!row) return res.status(404).json({ error: '豁免不存在' });
   res.json(gate.revokeExemption(row.project_id, req.params.xid, { reason: req.body?.reason }, String(req.body?.author || '匿名')));
+}));
+
+/* ==================== 讨论串（单句 / 时间范围，跨版本跟随与待重新定位） ==================== */
+
+// 列表：可按 status（open|resolved）/ anchorStatus（orphan|anchored）/ cueId / q（标题）筛选
+app.get('/api/projects/:id/discussions', wrap((req, res) => {
+  res.json({
+    discussions: discussion.listThreads(req.params.id, {
+      status: req.query.status || '',
+      anchorStatus: req.query.anchorStatus || '',
+      cueId: req.query.cueId || '',
+      q: req.query.q || '',
+    }),
+    summary: discussion.getSummary(req.params.id),
+  });
+}));
+
+// 未解决数量汇总（顶栏加载/轮询时使用；须先于 /:did 注册，避免被当成讨论 id）
+app.get('/api/projects/:id/discussions/summary', wrap((req, res) => {
+  res.json(discussion.getSummary(req.params.id));
+}));
+
+// 创建：挂在单句（cueId）或时间范围（start/end/trackId）上，支持 clientToken 幂等
+app.post('/api/projects/:id/discussions', wrap((req, res) => {
+  const result = discussion.createThread(req.params.id, req.body || {}, String(req.body?.author || '匿名'));
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+// 详情：讨论 + 全部事件（回复 / 状态变化 / 定位历史）+ 锚点上下文
+app.get('/api/projects/:id/discussions/:did', wrap((req, res) => {
+  res.json(discussion.detail(req.params.id, req.params.did));
+}));
+
+// 回复：expectedVersion 乐观锁，clientToken 防重复回复
+app.post('/api/projects/:id/discussions/:did/messages', wrap((req, res) => {
+  const b = req.body || {};
+  const result = discussion.reply(req.params.id, req.params.did, b, String(b.author || '匿名'));
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+// 解决
+app.post('/api/projects/:id/discussions/:did/resolve', wrap((req, res) => {
+  const b = req.body || {};
+  const result = discussion.resolveThread(req.params.id, req.params.did, b, String(b.author || '匿名'));
+  res.json(result);
+}));
+
+// 重新打开
+app.post('/api/projects/:id/discussions/:did/reopen', wrap((req, res) => {
+  const b = req.body || {};
+  const result = discussion.reopenThread(req.params.id, req.params.did, b, String(b.author || '匿名'));
+  res.json(result);
+}));
+
+// 人工重新定位：目标单句（cueId）或时间范围；保留旧位置/新位置/操作者
+app.post('/api/projects/:id/discussions/:did/relocate', wrap((req, res) => {
+  const b = req.body || {};
+  const result = discussion.relocate(req.params.id, req.params.did, b, String(b.author || '匿名'));
+  res.json(result);
 }));
 
 const PORT = Number(process.env.PORT) || 3000;

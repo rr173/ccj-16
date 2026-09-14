@@ -28,6 +28,7 @@
       <h1 id="proj-title"></h1>
       <span id="dirty-dot">● 未保存</span>
       <span id="save-status"></span>
+      <button id="disc-badge" class="disc-badge" title="查看讨论">💬 0 未解决</button>
       <div class="spacer"></div>
       <label style="color:var(--muted)">署名</label>
       <input name="author" id="author-input" />
@@ -70,6 +71,7 @@
         <div class="tabs">
           <button data-tab="cues" class="active">句子</button>
           <button data-tab="tracks">轨道</button>
+          <button data-tab="disc">讨论</button>
           <button data-tab="qc">质检</button>
           <button data-tab="gate">门禁</button>
           <button data-tab="release">发布</button>
@@ -88,6 +90,28 @@
           <button id="add-track-btn" class="small-btn" style="margin-bottom:10px;">+ 新轨道</button>
           <div id="track-list"></div>
           <p style="color:var(--muted);font-size:11px;">同一互斥组中的轨道，任何时刻最多只允许一条字幕同时出现。</p>
+        </div>
+        <div class="tab-pane" data-pane="disc">
+          <div class="new-row" style="margin-bottom:8px">
+            <button id="disc-new-range" class="small-btn primary">+ 在时间范围上发起讨论</button>
+            <span style="color:var(--muted);font-size:11px">在句子上发起：句子列表中每条句子的 💬 按钮</span>
+          </div>
+          <div class="qc-filters">
+            <select id="disc-filter-status">
+              <option value="">全部状态</option>
+              <option value="open">未解决</option>
+              <option value="resolved">已解决</option>
+            </select>
+            <select id="disc-filter-anchor">
+              <option value="">全部定位</option>
+              <option value="anchored">已定位</option>
+              <option value="orphan">待重新定位</option>
+            </select>
+            <input id="disc-filter-q" placeholder="按标题搜索" style="flex:1;min-width:90px" />
+            <button id="disc-filter-apply" class="small-btn">筛选</button>
+            <button id="disc-refresh" class="small-btn">刷新</button>
+          </div>
+          <div id="disc-list"></div>
         </div>
         <div class="tab-pane" data-pane="qc">
           <div class="pane-section-title">质量规则（项目级默认）</div>
@@ -403,6 +427,63 @@
       <div class="modal-footer">
         <button id="gate-eval-close">关闭</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 讨论创建弹窗（单句 / 时间范围） -->
+  <div class="modal-mask" id="disc-create-modal">
+    <div class="modal">
+      <h2>发起讨论</h2>
+      <div id="disc-create-anchor" class="disc-anchor"></div>
+      <div id="disc-create-exist"></div>
+      <div class="new-row" style="margin-top:8px">
+        <input id="disc-create-title" placeholder="标题（可选）" style="flex:1" />
+      </div>
+      <textarea id="disc-create-body" rows="4" placeholder="讨论内容…（必填）"
+        style="width:100%;margin-top:8px;background:#11151c;border:1px solid var(--border);border-radius:6px;padding:8px;color:inherit"></textarea>
+      <div class="modal-footer">
+        <button id="disc-create-cancel">取消</button>
+        <button class="primary" id="disc-create-submit">创建讨论</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 讨论详情弹窗 -->
+  <div class="modal-mask" id="disc-modal">
+    <div class="modal wide">
+      <h2 id="disc-modal-title">讨论</h2>
+      <div id="disc-modal-tags" style="margin-bottom:6px"></div>
+      <div id="disc-anchor-bar" class="disc-anchor"></div>
+
+      <div id="disc-relocate-panel" class="disc-relocate-panel" style="display:none">
+        <div class="pane-section-title">待重新定位：选择新位置（旧位置已保留在下方定位历史）</div>
+        <div class="hint" id="disc-candidates"></div>
+        <div class="qc-filters">
+          <select id="disc-cue-select" style="flex:1"></select>
+          <button id="disc-relocate-cue" class="small-btn primary">挂到所选句子</button>
+        </div>
+        <div class="qc-filters">
+          <input id="disc-range-start" style="width:120px" placeholder="范围开始" />
+          <span>→</span>
+          <input id="disc-range-end" style="width:120px" placeholder="范围结束" />
+          <select id="disc-range-track" style="flex:1"></select>
+          <button id="disc-relocate-range" class="small-btn">改挂为时间范围</button>
+        </div>
+      </div>
+
+      <div id="disc-events" class="disc-events"></div>
+      <div class="disc-reply">
+        <textarea id="disc-reply-input" rows="2" placeholder="回复…（Ctrl/⌘+Enter 发送）"></textarea>
+        <div class="row" style="display:flex;gap:6px;margin-top:6px">
+          <button class="primary" id="disc-send">发送</button>
+          <button id="disc-resolve">✓ 解决</button>
+          <button id="disc-reopen" style="display:none">↺ 重新打开</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="disc-modal-close">关闭</button>
+      </div>
+      <input type="hidden" id="disc-version" />
     </div>
   </div>
 

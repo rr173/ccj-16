@@ -6,8 +6,8 @@
   "main": "server/src/index.js",
   "scripts": {
     "start": "node server/src/index.js",
-    "test": "node test/merge.test.js && node test/import.test.js && node test/drag.test.mjs && node test/qc.test.js && node test/diffreport.test.js && node test/gate.test.js && node test/approval.test.js",
-    "test:e2e": "node server/src/index.js & SRV=$!; sleep 1; node test/e2e.test.js; R1=$?; node test/import.e2e.test.js; R2=$?; node test/qc.e2e.test.js; R3=$?; node test/diffreport.e2e.test.js; R4=$?; node test/gate.e2e.test.js; R5=$?; node test/approval.e2e.test.js; R6=$?; kill $SRV; exit $((R1 || R2 || R3 || R4 || R5 || R6))"
+    "test": "node test/merge.test.js && node test/import.test.js && node test/drag.test.mjs && node test/qc.test.js && node test/diffreport.test.js && node test/gate.test.js && node test/approval.test.js && node test/discussion.test.js",
+    "test:e2e": "node server/src/index.js & SRV=$!; sleep 1; node test/e2e.test.js; R1=$?; node test/import.e2e.test.js; R2=$?; node test/qc.e2e.test.js; R3=$?; node test/diffreport.e2e.test.js; R4=$?; node test/gate.e2e.test.js; R5=$?; node test/approval.e2e.test.js; R6=$?; node test/discussion.e2e.test.js; R7=$?; kill $SRV; exit $((R1 || R2 || R3 || R4 || R5 || R6 || R7))"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
