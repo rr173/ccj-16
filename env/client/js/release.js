@@ -271,11 +271,14 @@ function renderPreflight() {
   }
   const active = activeRequestFor(p.revisionId);
   if (active) {
-    const st = REQ_STATUS[active.status];
+    const stage = active.status === 'pending' ? currentStage(active) : null;
+    const waitText = stage
+      ? `当前阶段「${esc(stage.role)}」会签中（${stage.approvals}/${stage.min_approvals}）`
+      : '等待审核人处理';
     parts.push(`<div class="rel-gate ${active.status === 'approved' ? 'ok' : 'warn'}">
       ${active.status === 'approved'
         ? `✓ 申请 ${esc(active.id.slice(0, 10))} 已被 ${esc(active.reviewer)} 批准，可直接生成发布快照。`
-        : `⏳ 申请 ${esc(active.id.slice(0, 10))} 已提交，等待审核人处理（申请人 ${esc(active.applicant)}）。`}
+        : `⏳ 申请 ${esc(active.id.slice(0, 10))} 已提交，${waitText}（申请人 ${esc(active.applicant)}）。`}
     </div>`);
   }
   wrap.innerHTML = parts.join('');
@@ -409,7 +412,7 @@ async function doApprove(req) {
     if (r.deduplicated) {
       ctx.toast('你在本阶段已提交过相同意见（幂等，未重复记录）', '');
     } else if (r.outcome === 'collecting') {
-      const s = currentStage(r.request);
+      const s = currentStage(req);
       ctx.toast(`已同意（会签 ${r.approvals}/${s ? s.min_approvals : '?'}），等待其他审核人`, 'ok');
     } else if (r.outcome === 'stage-approved') {
       ctx.toast('当前阶段会签通过，已进入下一阶段', 'ok');
@@ -456,9 +459,14 @@ async function doReopen(req) {
     ctx.toast('已重新开启当前阶段（获得新的有效期窗口）', 'ok');
     ctx.refreshAudit?.();
     await refreshRequestsOnly();
+    if (rel.preflight) renderPreflight();
   } catch (e) {
     await refreshRequestsOnly();
-    ctx.toast('重新开启失败：' + e.message, 'error');
+    if (e.data?.invalidated) {
+      ctx.toast('重新开启失败：申请已失效（' + e.message + '），请重新预检并提交新申请', 'error');
+    } else {
+      ctx.toast('重新开启失败：' + e.message, 'error');
+    }
   }
 }
 
@@ -495,6 +503,126 @@ async function reapply(req) {
 
 /* ==================== 审批记录 ==================== */
 
+// 当前会签中的阶段（过期申请返回当前已过期阶段，供提示与重新开启定位）
+function currentStage(req) {
+  if (!req?.stages?.length) return null;
+  return req.stages.find((s) => s.status === 'active') || req.stages[req.current_stage] || null;
+}
+
+// 阶段进度：序号 + 角色 + 会签进度，按阶段状态着色（等待中的阶段不显示进度）
+function stageChipsHtml(q) {
+  return `<div class="stage-chips">${q.stages.map((s, i) => {
+    const st = STAGE_STATUS[s.status] || { label: s.status, cls: '' };
+    const prog = s.status === 'waiting' ? '' : ` ${s.approvals}/${s.min_approvals}`;
+    const reopened = s.reopened_count ? `；已重开 ${s.reopened_count} 次` : '';
+    return `<span class="stage-chip ${st.cls}" title="${esc(st.label)}${esc(reopened)}">${i + 1}．${esc(s.role)}${prog}</span>`;
+  }).join('')}</div>`;
+}
+
+// 待审核角色：当前阶段、最少同意人数、已收集会签与有效期截止
+function pendingStageHtml(q) {
+  const s = currentStage(q);
+  if (!s) return '';
+  const ttl = s.ttl_ms ? ` · 有效期至 ${dt(s.expires_at)}` : ' · 不限期';
+  return `<div class="meta">待审核：阶段 ${s.stage_index + 1}「${esc(s.role)}」（≥${s.min_approvals} 人同意，已会签 ${s.approvals}/${s.min_approvals}）${ttl}</div>`;
+}
+
+// 会签意见：逐阶段列出署名决定（同意/驳回、意见、时间）与阶段结论
+function stageDetailHtml(q) {
+  const out = [];
+  for (const s of q.stages) {
+    if (s.status === 'waiting') continue;
+    const st = STAGE_STATUS[s.status] || { label: s.status, cls: '' };
+    const extras = [];
+    if (s.status === 'active' || s.status === 'approved') extras.push(`会签 ${s.approvals}/${s.min_approvals}`);
+    if (s.status === 'rejected' && !s.allow_resubmit) extras.push('策略不允许重新提交');
+    if (s.reopened_count) extras.push(`已重开 ${s.reopened_count} 次`);
+    out.push(`<div class="stage-decision"><b>阶段 ${s.stage_index + 1}「${esc(s.role)}」${st.label}</b>${extras.length ? `（${extras.join(' · ')}）` : ''}</div>`);
+    if (s.status === 'expired' && s.expire_reason) {
+      out.push(`<div class="stage-decision">过期原因：${esc(s.expire_reason)}</div>`);
+    }
+    for (const d of s.decisions) {
+      out.push(`<div class="stage-decision"><b>${esc(d.reviewer)}</b> ${d.action === 'approve' ? '同意' : '驳回'}${d.comment ? `：${esc(d.comment)}` : ''} · ${dt(d.created_at)}</div>`);
+    }
+  }
+  return out.length ? `<div class="stage-detail">${out.join('')}</div>` : '';
+}
+
+/* ---------- 完整记录（事件流 + 重新提交链，按需向服务端取详情） ---------- */
+
+const EVENT_ACTION = {
+  submit: '提交申请',
+  resubmit: '重新提交',
+  'stage-activate': '阶段激活',
+  decision: '会签意见',
+  'stage-approved': '阶段通过',
+  'stage-rejected': '阶段驳回',
+  'stage-expired': '阶段过期',
+  'stage-reopened': '阶段重开',
+  'request-approved': '申请批准',
+  'request-rejected': '申请驳回',
+  invalidate: '申请失效',
+  publish: '发布快照',
+};
+
+function eventDetailText(e) {
+  const d = e.detail || {};
+  switch (e.action) {
+    case 'submit':
+      return `绑定版本 ${String(d.revisionId || '').slice(0, 8)} · ${d.policyHash ? `策略指纹 ${d.policyHash}` : '单步审批'}${d.message ? ` · 说明：${d.message}` : ''}`;
+    case 'resubmit':
+      return `第 ${d.versionNo} 次提交，上一申请 ${String(d.prevRequestId || '').slice(3, 11)}`;
+    case 'stage-activate':
+      return `阶段 ${e.stage_index + 1}「${d.role}」（≥${d.minApprovals} 人同意）`;
+    case 'decision':
+      return `${d.action === 'approve' ? '同意' : '驳回'}${d.role ? `（${d.role}）` : ''}${d.comment ? `：${d.comment}` : ''}`;
+    case 'stage-approved':
+      return `阶段 ${e.stage_index + 1} 会签通过（${d.approvals ?? '?'} 人同意）`;
+    case 'stage-rejected':
+      return `阶段 ${e.stage_index + 1} 被驳回${d.comment ? `：${d.comment}` : ''}`;
+    case 'stage-expired':
+      return d.reason || '';
+    case 'stage-reopened':
+      return `阶段 ${e.stage_index + 1}「${d.role}」（第 ${d.reopenedCount} 次重开${d.newExpiresAt ? `，新有效期至 ${dt(d.newExpiresAt)}` : ''}）`;
+    case 'request-rejected':
+      return `在第 ${d.stage ?? '?'} 阶段被驳回`;
+    case 'invalidate':
+      return d.text ? `${d.reason}：${d.text}` : (d.reason || '');
+    case 'publish':
+      return `生成发布快照 ${d.label}`;
+    default:
+      return '';
+  }
+}
+
+function renderRequestDetail(d) {
+  const rows = [];
+  if (d.chain.length > 1) {
+    rows.push(`<div class="ev">重新提交链：${d.chain.map((c) =>
+      `v${c.version_no} ${esc(c.id.slice(3, 11))}（${esc((REQ_STATUS[c.status] || {}).label || c.status)}）`,
+    ).join(' → ')}</div>`);
+  }
+  for (const e of d.events) {
+    const text = eventDetailText(e);
+    rows.push(`<div class="ev">${dt(e.created_at)} · <b>${esc(e.actor)}</b> ${EVENT_ACTION[e.action] || esc(e.action)}${text ? ` · ${esc(text)}` : ''}</div>`);
+  }
+  return rows.join('') || '<div class="ev">暂无记录</div>';
+}
+
+async function toggleRequestDetail(q, box, btn) {
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  btn.disabled = true;
+  try {
+    const d = await api.releaseRequestDetail(q.id);
+    box.innerHTML = renderRequestDetail(d);
+    box.style.display = 'block';
+  } catch (e) {
+    ctx.toast('加载审批记录失败：' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function renderRequests() {
   const wrap = $('#rel-requests');
   if (!rel.requests.length) {
@@ -505,6 +633,8 @@ function renderRequests() {
   for (const q of rel.requests) {
     const st = REQ_STATUS[q.status] || { label: q.status, cls: '' };
     const revMsg = rel.revisions.find((r) => r.id === q.revision_id)?.message || q.revision_id.slice(0, 8);
+    const staged = Array.isArray(q.stages) && q.stages.length > 0;
+    const expiredStage = q.status === 'expired' && staged ? q.stages.find((s) => s.status === 'expired') : null;
     const div = document.createElement('div');
     div.className = `rel-card relreq is-${q.status}` + (q.status === 'invalidated' || q.status === 'rejected' ? ' withdrawn' : '');
     const relRow = q.release_id
@@ -514,16 +644,22 @@ function renderRequests() {
       <div class="row">
         <b>申请 ${esc(q.id.slice(3, 11))}</b>
         <span class="tag ${st.cls}">${st.label}</span>
+        ${staged ? '<span class="tag">多阶段会签</span>' : ''}
         <span style="flex:1"></span>
         <span class="meta">${esc(revMsg.slice(0, 20))} · ${esc(q.revision_id.slice(0, 8))}</span>
       </div>
-      <div class="meta">申请人 ${esc(q.applicant)} · ${dt(q.created_at)}${q.message ? ` · 说明：${esc(q.message)}` : ''}</div>
+      <div class="meta">申请人 ${esc(q.applicant)} · ${dt(q.created_at)}${q.version_no > 1 ? ` · 第 ${q.version_no} 次提交` : ''}${q.message ? ` · 说明：${esc(q.message)}` : ''}</div>
       <div class="meta">绑定预检：${q.hasHardErrors ? '硬约束未通过 · ' : ''}阻断待处理 ${q.blockerCount} · 待确认警告 ${q.warningCount} · HEAD ${esc(q.boundHeadRevId.slice(0, 8))}</div>
+      ${staged ? stageChipsHtml(q) : ''}
+      ${staged && q.status === 'pending' ? pendingStageHtml(q) : ''}
+      ${staged ? stageDetailHtml(q) : ''}
       ${q.reviewer ? `<div class="meta">审核人 ${esc(q.reviewer)} · ${dt(q.reviewed_at)}${q.review_comment ? ` · 意见：${esc(q.review_comment)}` : ''}</div>` : ''}
       ${q.status === 'invalidated' ? `<div class="rel-item bad" style="margin-top:5px">✗ 已失效：${esc(INVALID_TEXT[q.invalid_reason] || q.invalid_reason)}（${dt(q.invalidated_at)}），请重新预检后重新申请。</div>` : ''}
+      ${q.status === 'expired' ? `<div class="rel-item warn" style="margin-top:5px">⏳ 审批阶段已超时${expiredStage?.expire_reason ? `：${esc(expiredStage.expire_reason)}` : ''}。版本/预检/门禁/策略均未变化时，项目负责人可重新开启当前阶段。</div>` : ''}
       ${relRow ? `<div class="meta" style="margin-top:4px">关联发布：<b>${esc(relRow.label)}</b></div>` : ''}
-      <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"></div>`;
-    const actions = div.querySelector('.row:last-child');
+      <div class="row relreq-actions" style="margin-top:6px;flex-wrap:wrap;gap:6px"></div>
+      <div class="relreq-events" style="display:none"></div>`;
+    const actions = div.querySelector('.relreq-actions');
     if (q.status === 'pending') {
       const b1 = document.createElement('button');
       b1.className = 'small-btn primary'; b1.textContent = '批准';
@@ -537,12 +673,30 @@ function renderRequests() {
       b.className = 'small-btn primary'; b.textContent = '生成发布快照';
       b.addEventListener('click', () => doPublish(q.id));
       actions.append(b);
+    } else if (q.status === 'expired') {
+      const b = document.createElement('button');
+      b.className = 'small-btn primary'; b.textContent = '重新开启当前阶段';
+      b.addEventListener('click', () => doReopen(q));
+      actions.append(b);
     } else if (q.status === 'invalidated') {
       const b = document.createElement('button');
       b.className = 'small-btn'; b.textContent = '重新预检并申请…';
       b.addEventListener('click', () => reapply(q));
       actions.append(b);
+    } else if (q.status === 'rejected') {
+      // 被驳回阶段策略允许重新提交时才给出入口（否则服务端会拒绝）
+      const rejStage = staged ? q.stages.find((s) => s.status === 'rejected') : null;
+      if (!rejStage || rejStage.allow_resubmit) {
+        const b = document.createElement('button');
+        b.className = 'small-btn'; b.textContent = '重新预检并申请…';
+        b.addEventListener('click', () => reapply(q));
+        actions.append(b);
+      }
     }
+    const recBtn = document.createElement('button');
+    recBtn.className = 'small-btn'; recBtn.textContent = '完整记录';
+    recBtn.addEventListener('click', () => toggleRequestDetail(q, div.querySelector('.relreq-events'), recBtn));
+    actions.append(recBtn);
     wrap.appendChild(div);
   }
 }
