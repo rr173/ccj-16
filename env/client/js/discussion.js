@@ -232,7 +232,7 @@ async function renderExistOnCue(cueId) {
     if (!discussions.length) return;
     $('#disc-create-exist').innerHTML =
       '<div class="pane-section-title" style="margin-top:8px">该句上已有讨论（点击查看）</div>' +
-      .map((t) =>
+      discussions.map((t) =>
         `<div class="disc-exist-row" data-id="${t.id}">${esc(t.title || '（无标题讨论）')}
            ${t.status === 'open' ? '<span class="tag qc-bad">未解决</span>' : '<span class="tag qc-ok">已解决</span>'}
            ${t.anchor_status === 'orphan' ? '<span class="tag disc-orphan-tag">待重新定位</span>' : ''}
@@ -283,7 +283,7 @@ async function submitCreate() {
 
 /* ==================== 详情 / 事件时间线 ==================== */
 
-async function openThread(id) {
+export async function openThread(id) {
   $('#disc-modal').classList.add('show');
   g.openId = id;
   await loadDetail(id);
