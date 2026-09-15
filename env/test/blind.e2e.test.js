@@ -203,6 +203,20 @@ ok(r.status === 403, '未达最少有效提交人数：关闭被禁止');
 const prog1 = await j('GET', `/api/projects/${pid}/blind-rounds/${rid}`);
 ok(prog1.data.round.progress.validSubmitters === 1 && prog1.data.round.progress.totalReviewers === 2
   && prog1.data.round.progress.thresholdMet === false, '进度：总人数/有效提交/达标状态');
+ok(prog1.data.round.progress.thresholdCompletionPct === 50, '进度含门槛完成比例（1/2 = 50%）');
+const rvA = prog1.data.round.progress.reviewers.find((x) => x.reviewer === A);
+ok(rvA && rvA.answered === 5 && rvA.completionPct === 100, '审阅人逐项完成比例（5/5 = 100%）');
+// 门槛前操作记录不得透露任何版本来源（即便创建时选过版本）
+const eventsBlind = await j('GET', `/api/blind-rounds/${rid}/events`);
+const eventsBlindJson = JSON.stringify(eventsBlind.data);
+ok(!eventsBlindJson.includes(rev1.id) && !eventsBlindJson.includes(rev2.id) && !eventsBlindJson.includes(rev3.id)
+  && !eventsBlindJson.includes('revisionId'),
+  '达到门槛前操作记录不透露任何版本来源（revisionIds 已抹除）');
+const auditBlind = await j('GET', `/api/projects/${pid}/audit`);
+const blindCreateEntry = auditBlind.data.audit.find((a) => a.action === 'blind-create'
+  && a.new_value && a.new_value.includes(round.title));
+ok(blindCreateEntry && !blindCreateEntry.new_value.includes(rev1.id) && blindCreateEntry.new_value.includes('versionCount'),
+  '达到门槛前盲审审计只记版本数量，不含版本 id');
 const itemProg = prog1.data.round.progress.perItem.find((p) => p.key === 'id:c1');
 ok(itemProg && itemProg.better === 1 && !JSON.stringify(prog1.data.round.progress.perItem).includes('"slot"'),
   '逐项分歧程度为匿名聚合（不含候选归属）');
@@ -276,6 +290,10 @@ const actions = new Set(events.data.events.map((e) => e.action));
 ok(['create', 'save', 'submit', 'reject', 'reveal', 'close'].every((a) => actions.has(a)),
   '操作记录覆盖创建/保存/提交/拒绝/揭示/关闭');
 ok(events.data.events.filter((e) => e.action === 'close').length === 1, '重复关闭不产生重复操作记录');
+// 揭示/关闭后操作记录可展示来源（创建事件的版本数量始终在；来源 id 仅揭示后出现）
+const createEvent = events.data.events.find((e) => e.action === 'create');
+ok(createEvent.detail.versionCount === 3 && JSON.stringify(createEvent.detail).includes(rev1.id),
+  '揭示后操作记录可回看版本来源（创建事件携带版本数量与 revisionIds）');
 const audit = await j('GET', `/api/projects/${pid}/audit`);
 const auditActions = new Set(audit.data.audit.map((a) => a.action));
 ok(['blind-create', 'blind-save', 'blind-submit', 'blind-reject', 'blind-reveal', 'blind-close'].every((a) => auditActions.has(a)),

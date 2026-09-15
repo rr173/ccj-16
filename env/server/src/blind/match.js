@@ -8,8 +8,10 @@
  *     加权分（复用差异报告的度量），达阈值成为内容边；
  *  3) 全部边按确定性顺序贪心并查集合并，每组每个版本至多一句——
  *     因此「某版删除后以新编号重建」的句子会并入同编号组，而不是单列成新增；
- *  4) 一句在同一其他版本里有 ≥2 个强候选 → 一对多（拆分）无法可靠对应，
- *     其内容边全部排除；最终落单的句子全部单列（新增/删除/一对多），不进对照项。
+ *  4) 一句在同一其他版本里有 ≥2 个强候选（稳定编号边也算强候选：拆分时其中
+ *     一半往往保留原编号）→ 一对多（拆分/合并）无法可靠对应；该句所在的整个
+ *     强候选连通分量整体排除（全部边不进对照项，分量内每句都单列为一对多），
+ *     保证一对多内容全部单列、每个对照项每个版本至多一条。
  *
  * 匿名化：每位审阅人看到的候选顺序由 sha256(roundId:reviewer:itemKey) 确定性洗牌，
  * 同一审阅人稳定、不同审阅人彼此独立；映射只在服务端计算，不下发。
@@ -96,6 +98,7 @@ function buildComparison(versions) {
 
   /* 边：稳定编号边（满分，最可靠）+ 内容相似边（加权分） */
   const edges = [];
+  const strongEdges = []; // 强候选边：用于一对多判定（编号边也算强候选）
   const byCueId = new Map();
   for (const n of nodes) {
     if (!byCueId.has(n.cueId)) byCueId.set(n.cueId, []);
@@ -105,7 +108,10 @@ function buildComparison(versions) {
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
         if (group[i].slot === group[j].slot) continue;
-        edges.push({ a: group[i], b: group[j], score: 1, via: 'id', sim: 1, time: 1 });
+        // 稳定编号是最可靠的对应；拆分时保留原编号的那一半同样计为强候选
+        const e = { a: group[i], b: group[j], score: 1, via: 'id', sim: 1, time: 1 };
+        edges.push(e);
+        strongEdges.push(e);
       }
     }
   }
@@ -116,35 +122,42 @@ function buildComparison(versions) {
       const b = nodes[j];
       if (a.slot === b.slot || a.cueId === b.cueId) continue;
       const s = pairScore(a, b);
-      if (isPairCandidate(s)) contentEdges.push({ a, b, ...s, via: 'content' });
+      if (isPairCandidate(s)) {
+        const e = { a, b, ...s, via: 'content' };
+        edges.push(e);
+        contentEdges.push(e);
+        if (isStrongCandidate(s)) strongEdges.push(e);
+      }
     }
   }
-  edges.push(...contentEdges);
 
-  /* 一对多判定（只看内容边）：某句在同一其他版本有 ≥2 个强候选 → 无法可靠对应，
-     其内容边全部排除（编号边不受影响：编号相同的句子仍然可靠成组） */
+  /* 一对多判定：某句在同一其他版本有 ≥2 个强候选（含稳定编号边）→ 拆分/合并，
+     无法可靠对应；该句所在的整个强候选连通分量整体排除——
+     分量内所有句子都单列为一对多，其任何边（编号边/内容边）都不进对照项，
+     保证一对多内容全部单列、每个对照项每个版本至多一条。 */
   const strongByNode = new Map(); // nodeId -> Map<otherSlot, count>
-  for (const c of contentEdges) {
-    if (!isStrongCandidate(c)) continue;
+  for (const c of strongEdges) {
     for (const [self, other] of [[c.a, c.b], [c.b, c.a]]) {
       if (!strongByNode.has(self.nodeId)) strongByNode.set(self.nodeId, new Map());
       const m = strongByNode.get(self.nodeId);
       m.set(other.slot, (m.get(other.slot) || 0) + 1);
     }
   }
-  const ambiguous = new Set(); // 一对多的句子：其内容边全部排除
-  const ambiguousInvolved = new Set(); // 其强候选（落单时同样标记一对多）
+  const seeds = new Set(); // 一对多中心句
   for (const [nodeId, bySlot] of strongByNode) {
     for (const cnt of bySlot.values()) {
-      if (cnt >= 2) {
-        ambiguous.add(nodeId);
-        for (const c of contentEdges) {
-          if (!isStrongCandidate(c)) continue;
-          if (c.a.nodeId === nodeId) ambiguousInvolved.add(c.b.nodeId);
-          if (c.b.nodeId === nodeId) ambiguousInvolved.add(c.a.nodeId);
-        }
-      }
+      if (cnt >= 2) seeds.add(nodeId);
     }
+  }
+  // 中心句沿强候选边扩展为整个连通分量
+  const strongDS = makeDisjointSet();
+  for (const n of nodes) strongDS.add(n.nodeId);
+  for (const e of strongEdges) strongDS.union(e.a.nodeId, e.b.nodeId);
+  const excluded = new Set(); // 一对多分量：全部单列，其边全部排除
+  if (seeds.size) {
+    const seedRoots = new Set();
+    for (const id of seeds) seedRoots.add(strongDS.find(id));
+    for (const n of nodes) if (seedRoots.has(strongDS.find(n.nodeId))) excluded.add(n.nodeId);
   }
 
   /* 贪心并查集合并：编号边优先，内容边按分数降序；每组每版本至多一句 */
@@ -157,10 +170,11 @@ function buildComparison(versions) {
   const ds = makeDisjointSet();
   for (const n of nodes) ds.add(n.nodeId);
   const groupSlots = new Map(); // root -> Set<slot>
+  for (const n of nodes) groupSlots.set(n.nodeId, new Set([n.slot])); // 单句组也登记本版本
   const groupEdges = new Map(); // root -> [contentScore,...]（组相似度取内容边最低分）
   const rootSlots = (root) => groupSlots.get(root) || new Set();
   for (const e of edges) {
-    if (e.via === 'content' && (ambiguous.has(e.a.nodeId) || ambiguous.has(e.b.nodeId))) continue;
+    if (excluded.has(e.a.nodeId) || excluded.has(e.b.nodeId)) continue; // 一对多分量不配对
     const ra = ds.find(e.a.nodeId);
     const rb = ds.find(e.b.nodeId);
     if (ra === rb) continue;
@@ -173,12 +187,12 @@ function buildComparison(versions) {
     ds.union(ra, rb);
     const root = ds.find(e.a.nodeId);
     const merged = new Set([...slotsA, ...slotsB]);
-    merged.add(e.a.slot);
-    merged.add(e.b.slot);
     groupSlots.set(root, merged);
+    groupSlots.delete(root === ra ? rb : ra);
     const scores = [...(groupEdges.get(ra) || []), ...(groupEdges.get(rb) || [])];
     if (e.via === 'content') scores.push(e.score);
     groupEdges.set(root, scores);
+    groupEdges.delete(root === ra ? rb : ra);
   }
 
   const groups = new Map(); // root -> [node]
@@ -190,7 +204,7 @@ function buildComparison(versions) {
   const items = [];
   const unmatched = [];
   for (const [root, members] of groups) {
-    if (members.length >= 2) {
+    if (members.length >= 2 && !members.some((m) => excluded.has(m.nodeId))) {
       const sameId = members.every((m) => m.cueId === members[0].cueId);
       const scores = groupEdges.get(root) || [];
       items.push({
@@ -200,13 +214,13 @@ function buildComparison(versions) {
         candidates: members.map(stripNode),
       });
     } else {
-      const n = members[0];
-      unmatched.push({
-        ...stripNode(n),
-        reason: ambiguous.has(n.nodeId) || ambiguousInvolved.has(n.nodeId)
-          ? REASON_ONE_TO_MANY
-          : REASON_NO_COUNTERPART,
-      });
+      // 一对多分量内的每一句都标为一对多；其余落单句为无可靠对应
+      for (const n of members) {
+        unmatched.push({
+          ...stripNode(n),
+          reason: excluded.has(n.nodeId) ? REASON_ONE_TO_MANY : REASON_NO_COUNTERPART,
+        });
+      }
     }
   }
 

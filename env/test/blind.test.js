@@ -58,6 +58,37 @@ ok(r.items.length === 0, '一对多不组成任何对照项');
 ok(r.unmatched.length === 3 && r.unmatched.every((u) => u.reason === REASON_ONE_TO_MANY),
   '原句与两个拆分句全部单列（一对多）');
 
+/* 4b) 实测回归：拆成两条且其中一条保留原稳定编号，另有版本保留整句
+       → 四句全部单列，绝不允许同一版本的两条字幕进同一对照项 */
+r = buildComparison([
+  V(0, [cue('c3', 6000, 7000, '将被拆分的句子内容')]),
+  V(1, [
+    cue('c3', 6000, 6500, '将被拆分的句子内容上'),
+    cue('n3', 6500, 7000, '将被拆分的句子内容下'),
+  ]),
+  V(2, [cue('c3', 6000, 7000, '将被拆分的句子内容')]),
+]);
+ok(r.items.length === 0, '保留编号的拆分仍不组成任何对照项');
+ok(r.unmatched.length === 4 && r.unmatched.every((u) => u.reason === REASON_ONE_TO_MANY),
+  '整句（两个版本）与拆分两句全部单列（一对多）');
+
+/* 4c) 反向一对多（合并）：一版整句 → 另一版两句且其一保留编号 → 同样全部单列 */
+r = buildComparison([
+  V(0, [
+    cue('c1', 0, 1000, '合并后的完整句子内容'),
+    cue('c2', 1000, 2000, '另一句正常内容'),
+  ]),
+  V(1, [
+    cue('c1', 0, 500, '合并后的完整句子'),
+    cue('n1', 500, 1000, '的完整句子内容'),
+    cue('c2', 1000, 2000, '另一句正常内容'),
+  ]),
+]);
+ok(!r.items.some((i) => i.candidates.length > 1 && i.candidates.some((c) => c.cueId === 'c1')),
+  '合并场景没有把整句与任一半句配成对照项');
+ok(r.unmatched.filter((u) => u.reason === REASON_ONE_TO_MANY).length === 3,
+  '合并涉及的三句全部单列（一对多）');
+
 /* 5) 同时间槽但文本无关 → 不配对（各自单列） */
 r = buildComparison([
   V(0, [cue('a1', 0, 1000, '苹果香蕉橘子西瓜')]),
@@ -87,18 +118,17 @@ r = buildComparison([
 ]);
 const idItem = r.items.find((i) => i.key === 'id:c1');
 const mxItem = r.items.find((i) => i.matchedBy === 'content');
-const c3Item = r.items.find((i) => i.key === 'id:c3');
 ok(idItem && idItem.candidates.length === 3, '三版共有编号组成三候选对照项');
 ok(mxItem && mxItem.candidates.length === 3
   && mxItem.candidates.map((c) => c.cueId).sort().join(',') === 'c2,c2,n1',
   '删除重建句并入同编号组（三候选内容对照项），不单列成新增');
-ok(c3Item && c3Item.matchedBy === 'id' && c3Item.candidates.length === 2,
-  '被拆分句在未拆分的两个版本间仍可靠成组');
+ok(!r.items.some((i) => i.key === 'id:c3'), '被拆分句不进任何对照项（即便两个未拆分版本编号相同）');
 ok(r.unmatched.some((u) => u.cueId === 'n4' && u.reason === REASON_NO_COUNTERPART), '独有句单列（无对应）');
-ok(r.unmatched.filter((u) => u.reason === REASON_ONE_TO_MANY).length === 2
-  && r.unmatched.every((u) => u.reason !== REASON_ONE_TO_MANY || ['n2', 'n3'].includes(u.cueId)),
-  '拆分出的两句单列（一对多），未拆分的版本不受影响');
-ok(!r.items.some((i) => i.candidates.some((c) => ['n2', 'n3'].includes(c.cueId))),
+const splitUnmatched = r.unmatched.filter((u) => u.reason === REASON_ONE_TO_MANY);
+ok(splitUnmatched.length === 4
+  && splitUnmatched.every((u) => u.cueId === 'c3' || ['n2', 'n3'].includes(u.cueId)),
+  '拆分涉及的四句（含两个未拆分版本的整句）全部单列（一对多）');
+ok(!r.items.some((i) => i.candidates.some((c) => c.cueId === 'c3' || ['n2', 'n3'].includes(c.cueId))),
   '一对多内容没有硬配进任何对照项');
 
 /* 7) 每组每版本至多一句：同版本两句相似句不会被并到同一组 */

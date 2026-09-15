@@ -126,7 +126,9 @@ function createRound(projectId, { revisionIds, minSubmitters, title }, author) {
     );
     insertEvent(id, projectId, 'create', actor, {
       title: String(title || '').trim().slice(0, 200),
+      // revisionIds 落库但在 listEvents 按盲态动态抹除（达到门槛、组织者揭示前不返回来源）
       revisionIds: ids,
+      versionCount: ids.length,
       minSubmitters: min,
       itemCount: items.length,
       unmatchedCount: unmatched.length,
@@ -134,8 +136,9 @@ function createRound(projectId, { revisionIds, minSubmitters, title }, author) {
   });
   txn();
   const row = getRoundRow(id);
+  // 审计同样只记数量（揭示后可经操作记录查看来源；审计表不承载版本来源）
   audit(row, 'blind-create', {
-    title: row.title, revisionIds: ids, minSubmitters: min,
+    title: row.title, versionCount: ids.length, minSubmitters: min,
     itemCount: items.length, unmatchedCount: unmatched.length,
   }, actor);
   return { round: roundDetail(row, { withSources: true }) };
@@ -174,6 +177,11 @@ function sourcesOf(row) {
   };
 }
 
+function pct(n, d) {
+  if (!d) return 0;
+  return Math.round((n / d) * 1000) / 10; // 保留一位小数的百分数
+}
+
 function progressOf(row) {
   const submissions = listSubmissionRows(row.id);
   const items = JSON.parse(row.items);
@@ -198,16 +206,23 @@ function progressOf(row) {
     validSubmitters: valid.length,
     minSubmitters: row.min_submitters,
     thresholdMet: valid.length >= row.min_submitters,
-    reviewers: submissions.map((s) => ({
-      reviewer: s.reviewer,
-      status: s.status,
-      answered: Object.keys(JSON.parse(s.answers)).length,
-      total: row.item_count,
-      submitted_at: s.submitted_at,
-      rejected_by: s.rejected_by,
-      rejected_at: s.rejected_at,
-      reject_reason: s.reject_reason,
-    })),
+    // 完成比例：有效提交相对门槛（门槛达成率），封顶 100%
+    thresholdCompletionPct: pct(Math.min(valid.length, row.min_submitters), row.min_submitters),
+    reviewers: submissions.map((s) => {
+      const answered = Object.keys(JSON.parse(s.answers)).length;
+      return {
+        reviewer: s.reviewer,
+        status: s.status,
+        answered,
+        total: row.item_count,
+        // 个人作答完成比例（草稿/被拒绝也展示进度）
+        completionPct: pct(answered, row.item_count),
+        submitted_at: s.submitted_at,
+        rejected_by: s.rejected_by,
+        rejected_at: s.rejected_at,
+        reject_reason: s.reject_reason,
+      };
+    }),
     perItem,
   };
 }
@@ -667,10 +682,22 @@ function getResult(roundId) {
   return { result: JSON.parse(row.result), round: roundMeta(row) };
 }
 
+// 盲态（未揭示且未关闭）下必须从操作记录抹掉的来源字段：
+// revisionIds 等版本标识在达到门槛、组织者揭示来源前不得透露
+const SOURCE_KEYS = ['revisionIds', 'revisionId', 'slot'];
+
 function listEvents(roundId) {
   const row = mustRound(roundId);
+  const revealed = Boolean(row.revealed_at) || row.status === 'closed';
   return db.prepare('SELECT * FROM blind_events WHERE round_id = ? ORDER BY id ASC').all(row.id)
-    .map((e) => ({ ...e, detail: e.detail ? JSON.parse(e.detail) : null, client_token: undefined }));
+    .map((e) => {
+      let detail = e.detail ? JSON.parse(e.detail) : null;
+      if (!revealed && detail && typeof detail === 'object') {
+        detail = { ...detail };
+        for (const k of SOURCE_KEYS) if (k in detail) delete detail[k];
+      }
+      return { ...e, detail, client_token: undefined };
+    });
 }
 
 module.exports = {

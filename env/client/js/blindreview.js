@@ -110,7 +110,7 @@ function renderRoundList(rounds) {
       </div>
       <div class="meta">
         对照项 ${rd.item_count} · 单列内容 ${rd.unmatched_count} · 候选版本 ${rd.version_count} 个<br/>
-        有效提交 <b>${p.validSubmitters}</b> / 门槛 ${rd.min_submitters} · 参与 ${p.totalReviewers} 人
+        门槛完成比例 <b>${p.validSubmitters}</b> / ${rd.min_submitters}（${p.thresholdCompletionPct ?? 0}%） · 参与 ${p.totalReviewers} 人
         ${p.thresholdMet ? '· <span class="tag qc-ok">已达门槛</span>' : '· 未达门槛'}
       </div>
       <div class="meta">创建：${esc(rd.created_by)} · ${dt(rd.created_at)}${rd.closed_at ? ` · 关闭：${dt(rd.closed_at)}` : ''}</div>
@@ -362,11 +362,22 @@ async function renderProgress(roundId) {
   const p = rd.progress;
   const body = viewShell(
     rd.title || '盲审轮次',
-    `有效提交 ${p.validSubmitters} / 门槛 ${rd.min_submitters} · 参与 ${p.totalReviewers} 人`
+    `门槛完成比例 ${p.validSubmitters} / ${rd.min_submitters}（${p.thresholdCompletionPct ?? 0}%） · 参与 ${p.totalReviewers} 人`
     + (rd.status === 'closed' ? ' · 已关闭' : p.thresholdMet ? ' · 已达门槛，可揭示来源或关闭' : ' · 未达门槛前不能揭示来源或关闭'),
   );
   const levelTag = { none: '<span class="tag">无投票</span>', unanimous: '<span class="tag qc-ok">一致</span>', split: '<span class="tag qc-warn">分歧</span>' };
   body.innerHTML = `
+    <div class="pane-section-title">门槛完成比例</div>
+    <div class="qc-job">
+      <div class="row">
+        <b>有效提交 ${p.validSubmitters} / ${rd.min_submitters}</b>
+        <span class="tag ${p.thresholdMet ? 'qc-ok' : 'qc-warn'}">${p.thresholdCompletionPct ?? 0}%</span>
+        <span class="meta">参与 ${p.totalReviewers} 人${p.thresholdMet ? ' · 已达门槛' : ' · 未达门槛'}</span>
+      </div>
+      <div class="blind-ratio-bar" title="门槛完成比例">
+        <div class="blind-ratio-fill ${p.thresholdMet ? 'qc-ok-bg' : ''}" style="width:${p.thresholdCompletionPct ?? 0}%"></div>
+      </div>
+    </div>
     <div class="pane-section-title">审阅人进度</div>
     ${p.reviewers.length ? p.reviewers.map((r) => `
       <div class="qc-job">
@@ -374,8 +385,11 @@ async function renderProgress(roundId) {
           <b>${esc(r.reviewer)}</b>
           <span class="tag ${r.status === 'submitted' ? 'qc-ok' : r.status === 'rejected' ? 'qc-bad' : ''}">${
             { draft: '作答中', submitted: '已提交', rejected: '已拒绝' }[r.status] || r.status}</span>
-          <span class="meta">${r.answered}/${r.total} 项</span>
+          <span class="meta">${r.answered}/${r.total} 项 · 完成 ${r.completionPct ?? 0}%</span>
           ${r.submitted_at ? `<span class="meta">提交于 ${dt(r.submitted_at)}</span>` : ''}
+        </div>
+        <div class="blind-ratio-bar" title="个人作答完成比例">
+          <div class="blind-ratio-fill ${r.status === 'submitted' ? 'qc-ok-bg' : ''}" style="width:${r.completionPct ?? 0}%"></div>
         </div>
         ${r.status === 'rejected' ? `<div class="meta">拒绝：${esc(r.reject_reason || '')}（${esc(r.rejected_by || '')} · ${dt(r.rejected_at)}）</div>` : ''}
         ${r.status === 'submitted' && rd.status === 'open' ? `<div class="row" style="margin-top:4px"><button class="small-btn danger blind-reject" data-reviewer="${esc(r.reviewer)}">拒绝该提交…</button></div>` : ''}

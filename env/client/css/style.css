@@ -403,3 +403,6 @@ main {
 .blind-comment { flex: 1; min-width: 140px; background: #11151c; border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-size: 12px; color: inherit; }
 .blind-progress { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .blind-unmatched { border: 1px dashed var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 7px; background: var(--panel2); font-size: 12px; }
+.blind-ratio-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 6px; }
+.blind-ratio-fill { height: 100%; width: 0; background: var(--warn); transition: width .2s; }
+.blind-ratio-fill.qc-ok-bg { background: var(--ok); }
