@@ -8,10 +8,14 @@
  *     加权分（复用差异报告的度量），达阈值成为内容边；
  *  3) 全部边按确定性顺序贪心并查集合并，每组每个版本至多一句——
  *     因此「某版删除后以新编号重建」的句子会并入同编号组，而不是单列成新增；
- *  4) 一句在同一其他版本里有 ≥2 个强候选（稳定编号边也算强候选：拆分时其中
- *     一半往往保留原编号）→ 一对多（拆分/合并）无法可靠对应；该句所在的整个
- *     强候选连通分量整体排除（全部边不进对照项，分量内每句都单列为一对多），
- *     保证一对多内容全部单列、每个对照项每个版本至多一条。
+ *  4) 一句在同一其他版本里有 ≥2 个可靠对应（稳定编号边 + 达配对门槛的内容边；
+ *     拆分时保留原编号的那一半是编号边，新编号的另一半是内容边）→ 一对多
+ *     （拆分/合并）无法可靠对应；该句所在的整个对应连通分量整体排除（全部边
+ *     不进对照项，分量内每句都单列为一对多），保证一对多内容全部单列、
+ *     每个对照项每个版本至多一条。注意计数与分量扩展不能另设更严的「强候选」
+ *     门槛：真正按前/后缀切开的半句，新编号那一半只有半段文本与整句重叠，
+ *     过严的门槛会漏判拆分，导致保留编号的前半句仍与整句配成对照项、
+ *     后半句被误标成无对应。
  *
  * 匿名化：每位审阅人看到的候选顺序由 sha256(roundId:reviewer:itemKey) 确定性洗牌，
  * 同一审阅人稳定、不同审阅人彼此独立；映射只在服务端计算，不下发。
@@ -19,15 +23,12 @@
 const crypto = require('crypto');
 const { textSimilarity, timeProximity } = require('../report/match');
 
-// 与差异报告一致的内容匹配阈值
+// 配对门槛与差异报告一致：加权分达阈，且文本/时间至少其一过硬守卫。
+// 达到该门槛的边即视为「可靠对应」，直接用于一对多判定——
+// 真正按前/后缀切开的半句只有半段文本与整句重叠，再加严门槛会漏判拆分。
 const PAIR_SCORE = 0.45;
 const PAIR_SIM_GUARD = 0.34;
 const PAIR_TIME_GUARD = 0.9;
-// 强候选阈值（用于一对多判定）。time 取 0.5：一句被拆成两句时，
-// 原句与每一半的时间重叠率约 0.5，阈值过高会漏判拆分导致硬配
-const STRONG_SCORE = 0.6;
-const STRONG_SIM = 0.5;
-const STRONG_TIME = 0.5;
 
 const REASON_NO_COUNTERPART = 'no-counterpart'; // 无可靠对应（新增/删除）
 const REASON_ONE_TO_MANY = 'one-to-many';       // 一对多（拆分等），不能硬配成一组
@@ -40,10 +41,6 @@ function pairScore(a, b) {
 
 function isPairCandidate(s) {
   return s.score >= PAIR_SCORE && (s.sim >= PAIR_SIM_GUARD || s.time >= PAIR_TIME_GUARD);
-}
-
-function isStrongCandidate(s) {
-  return s.score >= STRONG_SCORE && s.sim >= STRONG_SIM && s.time >= STRONG_TIME;
 }
 
 /* ---------------- 并查集（确定性：按边分数降序合并） ---------------- */
@@ -96,9 +93,9 @@ function buildComparison(versions) {
     }
   }
 
-  /* 边：稳定编号边（满分，最可靠）+ 内容相似边（加权分） */
+  /* 边：稳定编号边（满分，最可靠）+ 内容相似边（加权分）。
+     所有达配对门槛的边都同时用于贪心组对与一对多判定。 */
   const edges = [];
-  const strongEdges = []; // 强候选边：用于一对多判定（编号边也算强候选）
   const byCueId = new Map();
   for (const n of nodes) {
     if (!byCueId.has(n.cueId)) byCueId.set(n.cueId, []);
@@ -108,14 +105,11 @@ function buildComparison(versions) {
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
         if (group[i].slot === group[j].slot) continue;
-        // 稳定编号是最可靠的对应；拆分时保留原编号的那一半同样计为强候选
-        const e = { a: group[i], b: group[j], score: 1, via: 'id', sim: 1, time: 1 };
-        edges.push(e);
-        strongEdges.push(e);
+        // 稳定编号是最可靠的对应；拆分时保留原编号的那一半同样沿编号边参与判定
+        edges.push({ a: group[i], b: group[j], score: 1, via: 'id', sim: 1, time: 1 });
       }
     }
   }
-  const contentEdges = [];
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i];
@@ -123,41 +117,41 @@ function buildComparison(versions) {
       if (a.slot === b.slot || a.cueId === b.cueId) continue;
       const s = pairScore(a, b);
       if (isPairCandidate(s)) {
-        const e = { a, b, ...s, via: 'content' };
-        edges.push(e);
-        contentEdges.push(e);
-        if (isStrongCandidate(s)) strongEdges.push(e);
+        edges.push({ a, b, ...s, via: 'content' });
       }
     }
   }
 
-  /* 一对多判定：某句在同一其他版本有 ≥2 个强候选（含稳定编号边）→ 拆分/合并，
-     无法可靠对应；该句所在的整个强候选连通分量整体排除——
+  /* 一对多判定：某句在同一其他版本有 ≥2 个可靠对应（编号边或达阈内容边）
+     → 拆分/合并，无法可靠对应；该句所在的整个对应连通分量整体排除——
      分量内所有句子都单列为一对多，其任何边（编号边/内容边）都不进对照项，
-     保证一对多内容全部单列、每个对照项每个版本至多一条。 */
-  const strongByNode = new Map(); // nodeId -> Map<otherSlot, count>
-  for (const c of strongEdges) {
-    for (const [self, other] of [[c.a, c.b], [c.b, c.a]]) {
-      if (!strongByNode.has(self.nodeId)) strongByNode.set(self.nodeId, new Map());
-      const m = strongByNode.get(self.nodeId);
+     保证一对多内容全部单列、每个对照项每个版本至多一条。
+     这里不得用比配对门槛更严的阈值：拆成真正前/后缀半句时，新编号那一半
+     只有半段文本与整句重叠（相似度约 0.5~0.6），加严会让保留编号的前半句
+     仍与整句组成对照项、后半句被误标成无对应。 */
+  const byNode = new Map(); // nodeId -> Map<otherSlot, count>
+  for (const e of edges) {
+    for (const [self, other] of [[e.a, e.b], [e.b, e.a]]) {
+      if (!byNode.has(self.nodeId)) byNode.set(self.nodeId, new Map());
+      const m = byNode.get(self.nodeId);
       m.set(other.slot, (m.get(other.slot) || 0) + 1);
     }
   }
   const seeds = new Set(); // 一对多中心句
-  for (const [nodeId, bySlot] of strongByNode) {
+  for (const [nodeId, bySlot] of byNode) {
     for (const cnt of bySlot.values()) {
       if (cnt >= 2) seeds.add(nodeId);
     }
   }
-  // 中心句沿强候选边扩展为整个连通分量
-  const strongDS = makeDisjointSet();
-  for (const n of nodes) strongDS.add(n.nodeId);
-  for (const e of strongEdges) strongDS.union(e.a.nodeId, e.b.nodeId);
+  // 中心句沿对应边扩展为整个连通分量
+  const relDS = makeDisjointSet();
+  for (const n of nodes) relDS.add(n.nodeId);
+  for (const e of edges) relDS.union(e.a.nodeId, e.b.nodeId);
   const excluded = new Set(); // 一对多分量：全部单列，其边全部排除
   if (seeds.size) {
     const seedRoots = new Set();
-    for (const id of seeds) seedRoots.add(strongDS.find(id));
-    for (const n of nodes) if (seedRoots.has(strongDS.find(n.nodeId))) excluded.add(n.nodeId);
+    for (const id of seeds) seedRoots.add(relDS.find(id));
+    for (const n of nodes) if (seedRoots.has(relDS.find(n.nodeId))) excluded.add(n.nodeId);
   }
 
   /* 贪心并查集合并：编号边优先，内容边按分数降序；每组每版本至多一句 */
