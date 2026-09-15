@@ -8,6 +8,7 @@ const diffreport = require('./report/store');
 const gate = require('./gate/store');
 const discussion = require('./discussion/store');
 const blind = require('./blind/store');
+const proof = require('./proof/store');
 const { validate } = require('./validation');
 
 const app = express();
@@ -611,6 +612,150 @@ app.get('/api/blind-rounds/:rid/result', wrap((req, res) => {
 // 操作记录：创建/保存/提交/拒绝/关闭/揭示来源
 app.get('/api/blind-rounds/:rid/events', wrap((req, res) => {
   res.json({ events: blind.listEvents(req.params.rid) });
+}));
+
+/* ==================== 分段协作校对 ==================== */
+
+// 以片段 id 为路径的路由：解析项目/批次归属（不匹配时由 store 方法再 404/403）
+const proofContext = (sid) => proof.segContext(sid);
+
+// ---- 批次：从任意历史版本创建（自动切片 + 冻结基准）/ 列表 / 详情（按人员、状态过滤）----
+app.post('/api/projects/:id/proof/batches', wrap((req, res) => {
+  const b = req.body || {};
+  const result = proof.createBatch(req.params.id, {
+    revisionId: b.revisionId,
+    title: b.title,
+    gapMs: b.gapMs,
+    maxSegmentMs: b.maxSegmentMs,
+    trackIds: b.trackIds,
+    ttlMs: b.ttlMs,
+  }, String(b.author || '匿名'));
+  res.status(201).json(result);
+}));
+
+app.get('/api/projects/:id/proof/batches', wrap((req, res) => {
+  res.json(proof.listBatches(req.params.id));
+}));
+
+app.get('/api/projects/:id/proof/batches/:bid', wrap((req, res) => {
+  const row = proof.getBatchRow(req.params.bid);
+  if (!row || row.project_id !== req.params.id) return res.status(404).json({ error: '校对批次不存在' });
+  const result = proof.batchDetail(row, {
+    status: req.query.status || '',
+    assignee: req.query.assignee || '',
+    viewer: String(req.query.viewer || ''),
+  });
+  res.json(result);
+}));
+
+// ---- 片段操作：领取（带 clientToken 幂等）/ 续期 / 释放 / 组织者指派或改派 ----
+app.post('/api/proof/segments/:sid/claim', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.claim(ctx.projectId, ctx.batchId, req.params.sid, String(req.body?.reviewer || ''), {
+    clientToken: req.body?.clientToken,
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+app.post('/api/proof/segments/:sid/renew', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.renew(ctx.projectId, ctx.batchId, req.params.sid, String(req.body?.reviewer || ''), {
+    clientToken: req.body?.clientToken,
+  });
+  res.status(result.deduplicated ? 200 : 200).json(result);
+}));
+
+app.post('/api/proof/segments/:sid/release', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.release(ctx.projectId, ctx.batchId, req.params.sid, String(req.body?.reviewer || ''), {
+    clientToken: req.body?.clientToken,
+  });
+  res.status(result.deduplicated ? 200 : 200).json(result);
+}));
+
+app.post('/api/proof/segments/:sid/assign', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.assign(ctx.projectId, ctx.batchId, req.params.sid, {
+    assignee: req.body?.assignee,
+  }, String(req.body?.author || '匿名'));
+  res.json(result);
+}));
+
+// ---- 草稿保存（乐观锁 baseVersion + clientToken 幂等）----
+app.put('/api/proof/segments/:sid/draft', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const b = req.body || {};
+  const result = proof.saveDraft(ctx.projectId, ctx.batchId, req.params.sid, {
+    reviewer: b.reviewer,
+    content: b.content,
+    baseVersion: b.baseVersion,
+    clientToken: b.clientToken,
+  });
+  res.json(result);
+}));
+
+// ---- 提交 / 退回附理由 ----
+app.post('/api/proof/segments/:sid/submit', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.submit(ctx.projectId, ctx.batchId, req.params.sid, {
+    reviewer: req.body?.reviewer,
+    clientToken: req.body?.clientToken,
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+app.post('/api/proof/segments/:sid/return', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  const result = proof.returnSegment(ctx.projectId, ctx.batchId, req.params.sid, {
+    reason: req.body?.reason,
+  }, String(req.body?.author || '匿名'));
+  res.json(result);
+}));
+
+// ---- 组织者：与下一片段合并 / 按句拆分 ----
+app.post('/api/proof/segments/:sid/merge-next', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  res.json(proof.mergeAdjacent(ctx.projectId, ctx.batchId, req.params.sid, String(req.body?.author || '匿名')));
+}));
+
+app.post('/api/proof/segments/:sid/split', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  res.json(proof.splitSegment(ctx.projectId, ctx.batchId, req.params.sid, {
+    cueIdsFirst: req.body?.cueIdsFirst,
+  }, String(req.body?.author || '匿名')));
+}));
+
+// ---- 片段详情（基准内容/草稿/提交记录，草稿内容仅本人可见）----
+app.get('/api/proof/segments/:sid', wrap((req, res) => {
+  const ctx = proofContext(req.params.sid);
+  res.json(proof.segmentDetail(ctx.projectId, ctx.batchId, req.params.sid, String(req.query.viewer || '')));
+}));
+
+// ---- 个人待办（可跨项目；?projectId= 限定）----
+app.get('/api/proof/todos', wrap((req, res) => {
+  res.json(proof.myTodos(String(req.query.reviewer || ''), String(req.query.projectId || '')));
+}));
+
+// ---- 一次接受多个片段：逐段三向合并，冲突逐段报告，整体不部分写入 ----
+app.post('/api/projects/:id/proof/accept', wrap((req, res) => {
+  const b = req.body || {};
+  const result = proof.accept(req.params.id, {
+    batchId: b.batchId,
+    segmentIds: b.segmentIds,
+    resolutions: b.resolutions,
+    author: String(b.author || '匿名'),
+    message: String(b.message || ''),
+    clientToken: b.clientToken,
+  });
+  res.status(result.deduplicated ? 200 : 201).json(result);
+}));
+
+// ---- 批次操作记录（审计顺序）----
+app.get('/api/projects/:id/proof/events', wrap((req, res) => {
+  res.json(proof.listEvents(req.params.id, {
+    batchId: req.query.batchId || '',
+    limit: Number(req.query.limit) || 500,
+  }));
 }));
 
 const PORT = Number(process.env.PORT) || 3000;

@@ -189,9 +189,10 @@ export async function renderHistory() {
     if (r.kind === 'import') div.classList.add('import-rev');
     if (r.kind === 'rollback') div.classList.add('rollback-rev');
     if (r.kind === 'qcfix') div.classList.add('qcfix-rev');
+    if (r.kind === 'proof') div.classList.add('proof-rev');
     if (r.id === state.headRevId && !state.viewingRevId) div.classList.add('current');
     if (r.id === state.viewingRevId) div.classList.add('current');
-    const kindLabel = { create: '创建', edit: '编辑', merge: '合并', import: '导入', rollback: '回滚', qcfix: '质检修复' }[r.kind];
+    const kindLabel = { create: '创建', edit: '编辑', merge: '合并', import: '导入', rollback: '回滚', qcfix: '质检修复', proof: '校对合入' }[r.kind];
     let extra = '';
     if (r.kind === 'import' && r.meta?.kind === 'import') {
       const m = r.meta.imported;
@@ -202,6 +203,9 @@ export async function renderHistory() {
     }
     if (r.kind === 'qcfix' && r.meta?.kind === 'qcfix') {
       extra = `<br/>自动修复 ${r.meta.findingIds?.length || 0} 处`;
+    }
+    if (r.kind === 'proof' && r.meta?.kind === 'proof') {
+      extra = `<br/>合入 ${r.meta.segmentIds?.length || 0} 个片段${r.meta.conflictCount ? ` · 人工处理冲突 ${r.meta.conflictCount} 处` : ''}`;
     }
     const qcBadges = (qcByRev.get(r.id) || [])
       .map((j) => `<span class="tag">🔍质检#${j.id.slice(2, 8)}${j.status === 'done' && j.summary ? ` 阻${j.summary.blocker}/警${j.summary.warning}` : ''}</span>`)

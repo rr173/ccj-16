@@ -11,6 +11,7 @@ import { initDiffReport, refreshDiffReports } from './diffreport.js';
 import { initGate, refreshGateTab } from './gate.js';
 import { initDiscussion, refreshDiscussions, openThread } from './discussion.js';
 import { initBlindReview, refreshBlind } from './blindreview.js';
+import { initProof } from './proof.js';
 import { detectViolations } from './rules.js';
 import { msToSrt } from './time.js';
 
@@ -272,6 +273,7 @@ function bind() {
   initGate({ toast, getAuthor, refreshAudit: renderAudit, refreshHistory: renderHistory });
   initDiscussion({ toast, getAuthor, locate: handlers.locate });
   initBlindReview({ toast, getAuthor, refreshAudit: renderAudit });
+  initProof({ toast, getAuthor, refreshAudit: renderAudit });
   $('#disc-badge').addEventListener('click', () => {
     document.querySelector('.tabs button[data-tab="disc"]').click();
   });

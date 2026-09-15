@@ -516,6 +516,122 @@ CREATE TABLE IF NOT EXISTS blind_events (
 CREATE INDEX IF NOT EXISTS idx_blindevent_round ON blind_events(round_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_blindevent_token ON blind_events(round_id, client_token)
   WHERE client_token IS NOT NULL;
+
+-- ============ 分段协作校对 ============
+
+-- 校对批次：组织者从任意历史版本创建；创建时冻结基准快照（frozen_snapshot）与
+-- 自动切片参数（空隙阈值/最大片段时长/参与轨道/领取有效期）。此后项目继续编辑不影响批次。
+-- status: open（进行中）| completed（全部片段已合入）。
+CREATE TABLE IF NOT EXISTS proof_batches (
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL,
+  title           TEXT NOT NULL DEFAULT '',
+  base_rev_id     TEXT NOT NULL,           -- 批次基准版本（任意历史版本；三向合并的共同祖先）
+  head_rev_id     TEXT NOT NULL,           -- 创建时项目 HEAD（仅展示参考）
+  status          TEXT NOT NULL DEFAULT 'open', -- open | completed
+  frozen_snapshot TEXT NOT NULL,           -- 创建时冻结的完整快照 {duration,tracks,cues,settings}
+  gap_ms          INTEGER NOT NULL,        -- 字幕空隙切分阈值（ms，0=不因空隙切）
+  max_segment_ms  INTEGER NOT NULL,        -- 片段最大时间跨度（ms）
+  track_ids       TEXT NOT NULL DEFAULT '[]', -- 参与校对的轨道；[] = 全部轨道
+  ttl_ms          INTEGER NOT NULL,        -- 领取/退回后续改的有效期（ms）
+  seg_count       INTEGER NOT NULL,
+  created_by      TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  completed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pbatch_project ON proof_batches(project_id, created_at);
+
+-- 片段：切片连续且不重叠（按时间区间划分，跨轨交叠字幕永远在同一片段）。
+-- status（列状态；过期领取在读取时即时换算为 unclaimed，不依赖后台扫描）：
+--   unclaimed（未领取）| editing（编辑中，持有有效领取）| review（待审核）|
+--   returned（已退回，领取人在新一轮有效期内修改）| merged（已合入新版本）。
+-- claim_seq 每次易主/领取 +1：过期领取的迟到提交据此识别，绝不覆盖新人草稿。
+-- draft_snapshot 仅缓存「当前领取人」最新草稿；每人草稿另存 proof_drafts，释放/过期不丢。
+CREATE TABLE IF NOT EXISTS proof_segments (
+  id               TEXT PRIMARY KEY,
+  batch_id         TEXT NOT NULL REFERENCES proof_batches(id) ON DELETE CASCADE,
+  project_id       TEXT NOT NULL,
+  seq              INTEGER NOT NULL,       -- 批次内从 1 开始的稳定序号（合并/拆分后重排）
+  start_ms         INTEGER NOT NULL,
+  end_ms           INTEGER NOT NULL,
+  cue_ids          TEXT NOT NULL,          -- JSON 基准句子 id 列表（顺序即基准顺序）
+  baseline         TEXT NOT NULL,          -- 冻结基准 [{cue:{...}, trackName}]
+  status           TEXT NOT NULL DEFAULT 'unclaimed',
+  assignee         TEXT,
+  claim_expires_at INTEGER,
+  claim_seq        INTEGER NOT NULL DEFAULT 0,
+  draft_snapshot   TEXT,                   -- 当前领取人草稿 cues（JSON）；proof_drafts 按人保留
+  draft_version    INTEGER NOT NULL DEFAULT 0,
+  draft_updated_at INTEGER,
+  return_reason    TEXT,
+  returned_by      TEXT,
+  returned_at      INTEGER,
+  merged_rev_id    TEXT,
+  merged_at        INTEGER,
+  updated_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pseg_batch ON proof_segments(batch_id, seq);
+CREATE INDEX IF NOT EXISTS idx_pseg_assignee ON proof_segments(project_id, assignee);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pseg_seq ON proof_segments(batch_id, seq);
+
+-- 每位审校人每片段一份草稿：释放、过期被他人领走后草稿仍保留，再次领取时自动续作；
+-- 别人的草稿不会被新领取人覆盖（领取只恢复自己那份）。version 为草稿乐观锁。
+CREATE TABLE IF NOT EXISTS proof_drafts (
+  id          TEXT PRIMARY KEY,
+  segment_id  TEXT NOT NULL REFERENCES proof_segments(id) ON DELETE CASCADE,
+  batch_id    TEXT NOT NULL,
+  project_id  TEXT NOT NULL,
+  reviewer    TEXT NOT NULL,
+  content     TEXT NOT NULL,               -- JSON 片段 cues（id/轨道与基准一致，仅值可改）
+  version     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  UNIQUE(segment_id, reviewer)
+);
+
+-- 提交记录：同片段每次「提交/退回后再次提交」一行（seq 递增），提交时冻结内容；
+-- 重复请求（client_token）命中唯一索引直接返回原记录，不产生重复提交。
+-- status: submitted（待审核）| returned（已退回附理由）| accepted（已随合入接受）。
+CREATE TABLE IF NOT EXISTS proof_submissions (
+  id             TEXT PRIMARY KEY,
+  segment_id     TEXT NOT NULL REFERENCES proof_segments(id) ON DELETE CASCADE,
+  batch_id       TEXT NOT NULL,
+  project_id     TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  reviewer       TEXT NOT NULL,
+  snapshot       TEXT NOT NULL,            -- 提交时冻结的片段 cues
+  draft_version  INTEGER NOT NULL,
+  claim_seq      INTEGER NOT NULL,         -- 本次提交对应的领取代次
+  status         TEXT NOT NULL DEFAULT 'submitted',
+  submitted_at   INTEGER NOT NULL,
+  decided_by     TEXT,
+  decided_at     INTEGER,
+  return_reason  TEXT,
+  merged_rev_id  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_psub_segment ON proof_submissions(segment_id, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_psub_seq ON proof_submissions(segment_id, seq);
+
+-- 校对操作事件流（自增 id 即审计顺序，服务重启后顺序不变）：
+-- create | claim | renew | release | assign | reassign | merge | split |
+-- draft-save | submit | return | accept | conflict-resolve。
+-- client_token 在 (批次,片段,动作) 范围内唯一：领取/保存/提交/续期等请求重发幂等。
+CREATE TABLE IF NOT EXISTS proof_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id   TEXT NOT NULL,
+  batch_id     TEXT NOT NULL,
+  segment_id   TEXT,
+  action       TEXT NOT NULL,
+  actor        TEXT NOT NULL,
+  detail       TEXT,
+  client_token TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pe_batch ON proof_events(batch_id, id);
+CREATE INDEX IF NOT EXISTS idx_pe_project ON proof_events(project_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pe_token
+  ON proof_events(batch_id, segment_id, action, client_token)
+  WHERE client_token IS NOT NULL;
 `);
 
 // 旧库迁移：revisions.meta（导入/回滚清单）

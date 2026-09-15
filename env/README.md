@@ -26,6 +26,7 @@
 | 发布回归门禁 | 「门禁」页为项目创建多个**变更订阅**：各自指定一个发布快照或历史版本为基线（创建时冻结）与关注条件（轨道、差异类型、关键词、质检严重级别），可暂停/恢复。项目产生新版本、导入、质检完成/阻断处理或提交发布申请时，服务端异步生成带唯一事件编号（`GATE-XXXX-000001`…）的评估，逐项记录相对基线**新增/恶化/恢复/持续**的差异与**新出现且未处理**的阻断级质检问题，页面可查运行状态、逐项证据、基线/目标关联版本，并可按订阅/状态/门禁/趋势/触发/版本筛选，支持手动重跑（新事件）与失败重试（复用事件行、保留原因）。命中门禁时服务端**阻止基于该版本提交发布申请或生成发布快照**，除非审核人针对**本次事件 + 该版本**创建**具名豁免并填写理由**；豁免不能用于后续新版本（新版本必须重新评估）。并发新提交折叠为一次以最新 HEAD 重算的评估，重复触发/重跑不产生重复结果与重复通知。订阅变更、评估开始/完成/失败、门禁拦截、豁免、通知全部写审计 |
 | 讨论串 | 讨论可挂在**单句**（句子行 💬 按钮）或**时间范围**（讨论页「+ 在时间范围上发起讨论」，可指定轨道）上；成员可创建、回复、解决、重新打开。顶栏与讨论页汇总**未解决数量**（另单列「待重新定位」数），每条讨论可**一键跳到对应时间**（选中句子、定位播放头）。提交新版本后由提交钩子统一做跨版本跟随：稳定句子编号仍在即跟随（含文本/时间/跨轨修改）；编号消失时按「文本相似度 + 时间接近度」匹配——**唯一强匹配自动跟随并记录定位历史，对应字幕被删除、一句拆成多句（多候选）或证据不足无法唯一匹配时一律进入「待重新定位」，绝不悄悄挂到错误内容上**（保留旧位置与候选句子）。成员可在候选中一键重定位、手动选句或改挂时间范围；重定位事件保留**旧位置、新位置、操作者**。回复/解决/重开/重定位全部走事务内乐观锁（`WHERE version=?` 条件更新，并发写入失配返回 409 + 服务端当前状态，不丢消息、不覆盖），创建/回复/重定位携带 `clientToken` 唯一索引，**重复请求不产生重复回复**。状态变化与定位历史（创建/回复/解决/重开/自动跟随/待重新定位/人工重定位）在讨论详情与审计页均可查 |
 | 多版本盲审对照 | 「盲审」页从同一项目选 **2~3 个历史版本**创建盲审轮次，创建时**冻结各版本内容**并设定**最少有效提交人数**；能对应的字幕按**稳定编号 + 时间接近度 + 文本相似度**组成对照项（每组每版本至多一句，删除后重建的句子并入同编号组），**无法可靠对应的新增/删除/一对多内容单列，绝不硬配成一组**。每位审阅人看到**稳定但彼此独立的匿名候选顺序**（A/B/C，服务端按 轮次+审阅人+对照项 确定性洗牌），页面/接口/导出在达到门槛前均不含版本来源；逐项选更好候选/判相当/无法判断并填意见，**保存后刷新或重进接着原进度**；同一保存请求凭 `clientToken` 幂等不产生重复选择，并发修改同一审阅人进度返回 **409 + 当前结果**不静默覆盖。组织者可见总人数/完成比例/逐项分歧程度（匿名聚合），**未达最少有效提交人数前不能揭示来源或关闭**；达标后可揭示来源（幂等）、可关闭并生成**冻结结果**（每项票数/意见/胜出版本/单列内容，**平票明确保留为平票**），重复关闭返回同一份结果，关闭后不再接受新选择。创建/保存/提交/拒绝/关闭/揭示全部写操作记录与审计 |
+| 分段协作校对 | 「协作」页组织者从**任意历史版本**创建校对批次，服务端按**字幕空隙阈值与最大片段时长**自动切成**连续且不重叠**的片段（跨轨时间交叠的字幕必在同一片段），逐段**冻结基准内容**；组织者可**合并相邻片段、按句拆分、指派或重新指派**（领取中/待审核片段需先释放或退回）。审校人**只能编辑自己当前有效领取的片段**：领取有**明确到期时间**，可**续期**、可**主动释放**；同一片段并发领取用条件 UPDATE 保证**只有一方成功**，**过期提交一律拒绝**（领取代次 claim_seq 失配），**不可能覆盖别人的草稿**（每人草稿独立保留，重新领取只恢复本人那份）。每段支持**保存草稿（乐观锁）、提交、组织者退回附理由、修改后再次提交**；clientToken 唯一索引保证**重复请求不产生重复提交**。组织者可**一次勾选多个待审核片段接受**：以批次冻结基准为共同祖先与当前 HEAD **逐片段三向合并**，若项目 HEAD 或相关句子自批次创建后已经变化，**逐段报告可自动合入与需人工处理的冲突**（base/mine/theirs 对照），任一冲突未解**整体不写入（不会部分写入）**，全部解决后在单事务内生成**一个新版本**（kind=proof）并标记各段已合入。页面提供批次总览（未领取/编辑中/待审核/退回/已合入五态进度）、**按人员与状态过滤**、**个人待办**（退回待改/编辑中/待审核/可领取）、片段编辑弹窗（基准对照、到期倒计时、草稿/续期/释放/提交）与**冲突处理弹窗**；领取期限、草稿、提交记录与**审计事件顺序全部落盘，服务重启后保持一致** |
 | Docker | `docker compose up -d`，SQLite 数据在命名卷 `/data` |
 
 ## 快速开始
@@ -45,8 +46,8 @@ docker compose up -d --build
 ## 测试
 
 ```bash
-npm test                  # 三向合并 + 批量导入/回滚 + 拖动推挤规则 + 质检规则引擎 + 差异报告匹配/筛选/导出 + 门禁订阅 + 审批策略 + 讨论锚点跟随 + 盲审分组/匿名化 单测
-npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲突裁决->撤销->审计 / 质检->处理->发布->撤销 / 差异报告 / 门禁订阅->评估->豁免 / 多阶段会签审批 / 讨论跟随/孤儿/重定位/并发 / 盲审全流程
+npm test                  # 三向合并 + 导入/回滚 + 拖动推挤 + 质检 + 差异报告 + 门禁 + 审批策略 + 讨论 + 盲审 + 协作校对切片/领取/草稿/合入冲突 单测
+npm run test:e2e          # 端到端：并发保存裁决 / 导入 / 质检发布 / 差异报告 / 门禁豁免 / 多阶段会签 / 讨论 / 盲审 / 协作校对全流程（并发领取一方成功、过期拒绝、逐段冲突合入）
 ```
 
 ## 使用要点
@@ -116,6 +117,15 @@ npm run test:e2e          # 端到端：并发保存裁决 / 批量导入->冲�
 - **门槛与关闭**：有效提交（已提交且未被拒绝）达到 `min_submitters` 前，揭示来源与关闭均 403；达标后 `reveal` 幂等揭示来源，`close` 事务内条件更新生成**冻结结果**——每项按版本的票数、逐条署名意见、胜出版本（**平票含全判相当明确保留为平票**）与单列内容（带来源版本），重复关闭返回同一份结果；关闭后保存/提交/拒绝均 409。
 - **进度与记录**：组织者进度页明确给出完成比例——门槛完成比例（有效提交/门槛，含百分比与进度条）与每位审阅人的逐项作答完成比例；轮次列表同样展示门槛完成比例。创建/保存/提交/拒绝/揭示/关闭写 `blind_events`（页面「操作记录」可查）与审计表（`blind-create/save/submit/reject/reveal/close`）；创建事件中的 `revisionIds` 在来源揭示/轮次关闭前经接口动态抹除，**达到门槛并由组织者揭示前，操作记录不透露任何版本来源**，揭示后可回看；项目审计表的 `blind-create` 始终只记版本数量。
 
+## 分段协作校对（server/src/proof/）
+
+- **切片与冻结**：`proof_batches` 从任意历史版本创建，冻结整版快照与切片参数（空隙阈值 / 最大片段时长 / 参与轨道 / 领取有效期）。切片（`segments.js`）把所选轨道字幕按 (start,end,id) 排序，相邻空隙 > 阈值或纳入后跨度超限时在下一句前切开；**跨轨时间交叠的字幕永不切开**，作为跨度超限的必要例外。片段在时间区间上连续不重叠，每条字幕恰好属于一个片段。
+- **领取与并发**：`proof_segments.claim_seq` 每次领取/改派/退回 +1；领取、续期、释放、指派都走事务内**条件 UPDATE**，并发领取同一片段只有一方 `changes=1`，另一方收到 409 与当前持有人/到期时间。到期不依赖后台扫描，在每次读取（`effectiveStatus`）与写入时即时换算；过期领取的保存/提交被拒绝（410/403），旧领取人的迟到写入不可能覆盖新领取人的草稿。
+- **草稿隔离**：`proof_drafts` 按 (片段, 审校人) 唯一；片段行上的 `draft_snapshot` 只缓存当前领取人的草稿，释放/过期/被改派后该人草稿仍在，重新领取（或被指派回来）时恢复本人草稿，永远拿不到别人的草稿。草稿句子集合/顺序必须与冻结基准完全一致（不能增删句或换轨，仅时间/文本/锁定可改），保存带 `baseVersion` 乐观锁（失配 409）与整快照硬错误校验（反向区间拒绝）。
+- **提交与退回**：每次提交在 `proof_submissions` 追加一行（片段内 seq 递增）并冻结内容；同令牌重发命中 `proof_events` 唯一索引直接返回原记录，**重复请求不产生重复提交**。组织者退回必填理由，片段带着新一轮有效期回到领取人手中（status=returned），改后再次提交生成新一行，完整历史保留。
+- **一次接受多片段**：组织者勾选多个待审核片段调用 accept；对每段以冻结基准为 base、提交稿为 mine、当前 HEAD 为 theirs 做三向合并，逐段产出 `auto | unchanged | conflict` 报告（含逐 cue 的 base/mine/theirs 与合法选择）。**任一片段存在未解决冲突即返回 409 且不产生任何写入**；前端逐处选择 mine/theirs（edit-delete 还可选 delete）后携 resolutions 重发，规划期间 HEAD 若再推进会收到 head-moved 要求重新发起；全部可合入时在**单事务**内生成一个 `kind=proof` 版本并逐段标记 merged/accepted（内容未变化的段不标记、不产生空版本），全部合入后批次 completed。
+- **事件与持久化**：create/claim/renew/release/assign/reassign/merge/split/draft-save/submit/return/accept/batch-complete 全部写 `proof_events`（自增 id 即审计顺序，(批次,片段,动作,client_token) 唯一索引承担幂等），关键动作同步进项目审计表；所有状态（含到期时间戳、草稿、提交记录）存 SQLite，重启后即时换算与审计顺序保持一致。
+
 ## 版本树
 
 ```
@@ -135,6 +145,16 @@ blind_rounds(id, min_submitters 最少有效提交人数, status=open|closed,
 blind_submissions(round_id+reviewer 唯一, status=draft|submitted|rejected,
                   answers 按槽位存储的选择, version 乐观锁)
 blind_events(round_id, action=create|save|submit|reject|reveal|close, client_token 幂等)
+proof_batches(id, base_rev_id 任意历史版本, frozen_snapshot 创建时冻结, gap_ms/max_segment_ms/track_ids/ttl_ms,
+              status=open|completed)
+proof_segments(batch_id, seq 重排, start_ms/end_ms 连续不重叠, cue_ids/baseline 冻结基准,
+               status=unclaimed|editing|review|returned|merged, assignee/claim_expires_at,
+               claim_seq 领取代次, draft_snapshot 当前领取人草稿缓存, merged_rev_id)
+proof_drafts(segment_id+reviewer 唯一, content, version 乐观锁 —— 释放/过期/改派后草稿保留)
+proof_submissions(segment_id+seq, reviewer, snapshot 提交时冻结, draft_version/claim_seq,
+                  status=submitted|returned|accepted, return_reason, merged_rev_id)
+proof_events(batch_id, segment_id, action=create|claim|renew|release|assign|reassign|merge|split|
+             draft-save|submit|return|accept|batch-complete, client_token 幂等, 自增 id 即审计顺序)
 ```
 
 普通提交父链为线性；三向合并/导入冲突裁决提交 `parent1 = 当时HEAD`、`parent2 = 提交者的分叉基点`，因此从任意历史版本分叉再保存都会保留完整的分支/合并关系。
@@ -153,11 +173,12 @@ server/src/report/ match.js（句子匹配 + 逐项差异）· store.js（报告
 server/src/gate/ store.js（变更订阅 / 评估事件 / 门禁 / 具名豁免）
 server/src/discussion/ match.js（锚点跨版本跟随匹配）· store.js（讨论/事件/乐观锁/幂等/提交钩子跟随）
 server/src/blind/ match.js（多版本对照分组 + 匿名洗牌）· store.js（轮次/保存/提交/拒绝/揭示/关闭）
-client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/importer/discussion/blindreview/qc/gate/release/diffreport/app）
+server/src/proof/ segments.js（空隙/最大时长自动切片）· store.js（批次/领取/草稿/提交/退回/合并拆分/多片段合入）
+client/       index.html · css/ · js/（api/state/rules/timeline/player/sidebar/conflict/importer/discussion/blindreview/proof/qc/gate/release/diffreport/app）
 test/         merge.test.js · import.test.js · drag.test.mjs · qc.test.js · diffreport.test.js · gate.test.js · approval.test.js
-              · discussion.test.js · blind.test.js
+              · discussion.test.js · blind.test.js · proof-segments.test.js · proof.test.js
               · e2e.test.js · import.e2e.test.js · qc.e2e.test.js · diffreport.e2e.test.js · gate.e2e.test.js · approval.e2e.test.js
-              · discussion.e2e.test.js · blind.e2e.test.js
+              · discussion.e2e.test.js · blind.e2e.test.js · proof.e2e.test.js
 Dockerfile · docker-compose.yml
 ```
 

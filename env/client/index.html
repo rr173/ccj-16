@@ -72,6 +72,7 @@
           <button data-tab="cues" class="active">句子</button>
           <button data-tab="tracks">轨道</button>
           <button data-tab="disc">讨论</button>
+          <button data-tab="proof">协作</button>
           <button data-tab="blind">盲审</button>
           <button data-tab="qc">质检</button>
           <button data-tab="gate">门禁</button>
@@ -113,6 +114,35 @@
             <button id="disc-refresh" class="small-btn">刷新</button>
           </div>
           <div id="disc-list"></div>
+        </div>
+        <div class="tab-pane" data-pane="proof">
+          <div class="pane-section-title">创建协作校对批次（从任意历史版本，创建时冻结基准并自动切片）</div>
+          <div class="qc-filters">
+            <select id="proof-rev-select" style="flex:1;min-width:160px"></select>
+          </div>
+          <div class="qc-filters">
+            <input id="proof-title" placeholder="批次标题（可选）" style="flex:1;min-width:120px" />
+            <input id="proof-gap" type="number" min="0" value="2000" title="字幕空隙阈值（毫秒）" style="width:110px" />
+            <input id="proof-max" type="number" min="1000" value="30000" title="片段最大时长（毫秒）" style="width:110px" />
+            <input id="proof-ttl" type="number" min="1" value="30" title="领取有效期（分钟）" style="width:90px" />
+            <button id="proof-create-btn" class="small-btn primary">创建批次</button>
+          </div>
+          <div id="proof-track-pick" class="proof-track-pick"></div>
+
+          <div class="pane-section-title" style="display:flex;align-items:center;gap:8px">
+            <span>我的待办</span>
+            <input id="proof-todo-name" placeholder="你的署名" style="flex:0 1 130px" />
+            <button id="proof-todo-load" class="small-btn">查看待办</button>
+            <span id="proof-todo-hint" style="color:var(--muted);font-size:11px"></span>
+          </div>
+          <div id="proof-todos"></div>
+
+          <div class="pane-section-title" style="display:flex;align-items:center;gap:8px">
+            <span>校对批次</span>
+            <button id="proof-refresh" class="small-btn">刷新</button>
+          </div>
+          <div id="proof-batches"></div>
+          <div id="proof-view"></div>
         </div>
         <div class="tab-pane" data-pane="blind">
           <div class="pane-section-title">创建盲审轮次（从同一项目选 2~3 个历史版本，创建时冻结内容）</div>
@@ -512,6 +542,69 @@
         <button id="disc-modal-close">关闭</button>
       </div>
       <input type="hidden" id="disc-version" />
+    </div>
+  </div>
+
+  <!-- 协作校对：片段编辑弹窗 -->
+  <div class="modal-mask" id="proof-seg-modal">
+    <div class="modal wide">
+      <h2 id="proof-seg-title">片段校对</h2>
+      <div id="proof-seg-meta" class="import-meta"></div>
+      <div id="proof-seg-banner" class="qc-stale-banner" style="display:none"></div>
+      <div class="import-table-wrap" style="max-height:52vh">
+        <table class="import-table" id="proof-seg-table"></table>
+      </div>
+      <div id="proof-seg-submissions" style="max-height:18vh;overflow:auto;margin-top:6px"></div>
+      <div class="modal-footer">
+        <button id="proof-seg-cancel">关闭</button>
+        <button class="primary" id="proof-seg-claim" style="display:none">领取该片段</button>
+        <button id="proof-seg-renew" style="display:none">续期</button>
+        <button id="proof-seg-release" class="danger" style="display:none">释放领取</button>
+        <button id="proof-seg-save" style="display:none">保存草稿</button>
+        <button class="primary" id="proof-seg-submit" style="display:none">提交审核</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 协作校对：组织者退回弹窗 -->
+  <div class="modal-mask" id="proof-return-modal">
+    <div class="modal">
+      <h2>退回片段</h2>
+      <p id="proof-return-seg" class="meta"></p>
+      <textarea id="proof-return-reason" rows="3" placeholder="退回理由（必填，审校人可据此修改后再次提交）"
+        style="width:100%;background:#11151c;border:1px solid var(--border);border-radius:6px;padding:8px;color:inherit"></textarea>
+      <div class="modal-footer">
+        <button id="proof-return-cancel">取消</button>
+        <button class="primary" id="proof-return-confirm">退回</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 协作校对：合入冲突处理弹窗 -->
+  <div class="modal-mask" id="proof-conflict-modal">
+    <div class="modal wide">
+      <h2>接受片段：逐段冲突处理</h2>
+      <div class="hint">
+        以下片段自批次创建后，项目 HEAD 或相关句子已经变化。可自动合入的片段会直接并入；
+        标红的冲突句需要逐处选择采用<b>审校稿</b>还是<b>保留 HEAD</b>。
+        任一冲突未处理都不会写入，全部解决后一次生成一个新版本。
+      </div>
+      <div id="proof-conflict-body" class="import-table-wrap" style="max-height:56vh"></div>
+      <div class="modal-footer">
+        <button id="proof-conflict-cancel">取消</button>
+        <button class="primary" id="proof-conflict-confirm">应用选择并接受所选片段</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 协作校对：操作记录弹窗 -->
+  <div class="modal-mask" id="proof-events-modal">
+    <div class="modal wide">
+      <h2>协作校对操作记录</h2>
+      <div id="proof-events-body" class="disc-events" style="max-height:60vh;overflow:auto"></div>
+      <div class="modal-footer">
+        <button id="proof-events-close">关闭</button>
+      </div>
     </div>
   </div>
 

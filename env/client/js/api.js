@@ -108,4 +108,26 @@ export const api = {
   blindClose: (rid, author) => request('POST', `/api/blind-rounds/${rid}/close`, { author }),
   blindResult: (rid) => request('GET', `/api/blind-rounds/${rid}/result`),
   blindEvents: (rid) => request('GET', `/api/blind-rounds/${rid}/events`),
+  // ---- 分段协作校对 ----
+  proofList: (id) => request('GET', `/api/projects/${id}/proof/batches`),
+  proofCreate: (id, payload) => request('POST', `/api/projects/${id}/proof/batches`, payload),
+  proofBatch: (id, bid, q = {}) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v !== '' && v != null)).toString();
+    return request('GET', `/api/projects/${id}/proof/batches/${bid}${qs ? '?' + qs : ''}`);
+  },
+  proofSegment: (sid, viewer) => request('GET', `/api/proof/segments/${sid}${viewer ? '?viewer=' + encodeURIComponent(viewer) : ''}`),
+  proofTodos: (reviewer, projectId) =>
+    request('GET', `/api/proof/todos?reviewer=${encodeURIComponent(reviewer)}${projectId ? '&projectId=' + projectId : ''}`),
+  proofClaim: (sid, payload) => request('POST', `/api/proof/segments/${sid}/claim`, payload),
+  proofRenew: (sid, payload) => request('POST', `/api/proof/segments/${sid}/renew`, payload),
+  proofRelease: (sid, payload) => request('POST', `/api/proof/segments/${sid}/release`, payload),
+  proofAssign: (sid, payload) => request('POST', `/api/proof/segments/${sid}/assign`, payload),
+  proofDraft: (sid, payload) => request('PUT', `/api/proof/segments/${sid}/draft`, payload),
+  proofSubmit: (sid, payload) => request('POST', `/api/proof/segments/${sid}/submit`, payload),
+  proofReturn: (sid, payload) => request('POST', `/api/proof/segments/${sid}/return`, payload),
+  proofMergeNext: (sid, payload) => request('POST', `/api/proof/segments/${sid}/merge-next`, payload),
+  proofSplit: (sid, payload) => request('POST', `/api/proof/segments/${sid}/split`, payload),
+  proofAccept: (id, payload) => request('POST', `/api/projects/${id}/proof/accept`, payload),
+  proofEvents: (id, batchId) =>
+    request('GET', `/api/projects/${id}/proof/events${batchId ? '?batchId=' + batchId : ''}`),
 };
